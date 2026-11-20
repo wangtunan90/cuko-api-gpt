@@ -1,0 +1,8 @@
+[
+  {
+    "modelId": "gpt-account-1",
+    "displayName": "GPT 账号 1",
+    "debugPort": 9333,
+    "profileId": "default"
+  }
+]

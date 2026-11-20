@@ -6,6 +6,9 @@
   "scripts": {
     "start": "node bridge/index.js"
   },
+  "dependencies": {
+    "chrome-remote-interface": "^0.34.0"
+  },
   "engines": {
     "node": ">=18"
   }

@@ -1,0 +1,41 @@
+event: delta_encoding
+data: "v1"
+
+data: {"type":"resume_conversation_token","kind":"topic","token":"eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb25kdWl0X3V1aWQiOiI2ZjFlZjljN2JjYzM0NWEyYTY1MThjODhhMThkYWM5MyIsImNvbmR1aXRfbG9jYXRpb24iOiIxMC4xMzAuMjQzLjIyOTo4MzExIiwiY2x1c3RlciI6InVuaWZpZWQtMTI4IiwiaWF0IjoxNzk1MTU0NDM0LCJleHAiOjE3OTUxNjg4MzQsInR1cm5fdG9waWNfaWQiOiJjb252ZXJzYXRpb24tdHVybi01NTFmMjFjMi0wY2Q0LTQ4M2UtODBiNC04ZWQyYWMzNGRkYzcifQ.pCNghHKWhG15ACIKLUompElE3RTAgU18Oe04RC5mYOWpMAWtabU4wQTCIynwRK6g5xbyAk8hR_1QTzNmniw9CQ","conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f"}
+
+data: {"type":"input_message","input_message":{"id":"b1438e72-e595-48de-9de0-f89061208f4e","author":{"role":"user","name":null,"metadata":{}},"create_time":1795154432.575,"update_time":null,"content":{"content_type":"text","parts":["\u4f60\u662f\u4ec0\u4e48\u6a21\u578b"]},"status":"finished_successfully","end_turn":null,"weight":1.0,"metadata":{"system_hints":["reason"],"turn_id":"27e66702-1476-5de0-aa29-5878da1e128e","request_id":"1107320a-5fbd-45f6-aec5-b21ac76bb9ed","message_source":null,"turn_exchange_id":"551f21c2-0cd4-483e-80b4-8ed2ac34ddc7","working_turn_id":"551f21c2-0cd4-483e-80b4-8ed2ac34ddc7","parent_id":"cfbb7480-18ce-4a6a-bbf7-120686ddc1ff"},"recipient":"all","channel":null},"conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f"}
+
+data: { "type":"ads","visibility":{"status":"allowed","reason":null,"late_ads_discard_timeout_ms":4500},"content":null,"ads_response_id":null,"ads_response_type":"placement_policy","ads_response_index":null,"chatgpt_codex_web_routing_free_v2_group":null,"lightweight_visibility_is_cached":null,"late_ads_discard_timeout_ms":4500,"debug_info":null}
+
+event: delta
+data: {"p":"","o":"add","v":{"message":{"id":"2662874f-3230-45d9-a525-5a95dac0016a","author":{"role":"system","name":null,"metadata":{}},"create_time":null,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":true,"weight":0.0,"metadata":{"is_visually_hidden_from_conversation":true,"model_slug":"gpt-6-t-mini"},"recipient":"all","channel":null},"conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f","error":null,"error_code":null},"c":0}
+
+event: delta
+data: {"v":{"message":{"id":"b16128f3-1bd4-4887-ae44-7b6ab1616143","author":{"role":"system","name":null,"metadata":{}},"create_time":1795154434.2009022,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":null,"weight":1.0,"metadata":{"model_slug":"gpt-6-t-mini"},"recipient":"all","channel":null},"conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f","error":null,"error_code":null},"c":1}
+
+event: delta
+data: {"v":{"message":{"id":"82d611cf-baf8-4cb8-8664-2a84805ceafb","author":{"role":"assistant","name":null,"metadata":{}},"create_time":1795154434.369734,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"in_progress","end_turn":false,"weight":1.0,"metadata":{"parent_id":"b16128f3-1bd4-4887-ae44-7b6ab1616143","model_switcher_deny":[]},"recipient":"all","channel":"final"},"conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f","error":null,"error_code":null},"c":2}
+
+data: {"type":"message_marker","conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f","message_id":"82d611cf-baf8-4cb8-8664-2a84805ceafb","marker":"user_visible_token","event":"first"}
+
+data: {"type":"message_marker","conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f","message_id":"82d611cf-baf8-4cb8-8664-2a84805ceafb","marker":"final_channel_token","event":"first"}
+
+event: delta
+data: {"o":"patch","v":[{"p":"/message/content/parts/0","o":"append","v":"\u6211\u662f **GPT-"},{"p":"/message/end_turn","o":"replace","v":null},{"p":"/message/metadata/is_visually_hidden_from_conversation","o":"remove"},{"p":"/message/metadata","o":"append","v":{"turn_exchange_id":"551f21c2-0cd4-483e-80b4-8ed2ac34ddc7","model_slug":"gpt-6-t-mini","message_type":"next","content_references":[]}}]}
+
+event: delta
+data: {"v":[{"p":"/message/content/parts/0","o":"append","v":"6**\uff0c\u7531 OpenAI \u8bad\u7ec3\u7684\u63a8\u7406\u6a21\u578b\u3002"},{"p":"/message/metadata/model_dil_v2/fallbackMarkdown","o":"replace","v":"x"}]}
+
+event: delta
+data: {"v":[{"p":"/message/status","o":"replace","v":"finished_successfully"},{"p":"/message/end_turn","o":"replace","v":true},{"p":"/message/metadata","o":"append","v":{"can_save":true,"finish_details":{"type":"stop","stop_tokens":[200002]},"is_complete":true}}]}
+
+data: {"type":"message_marker","conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f","message_id":"82d611cf-baf8-4cb8-8664-2a84805ceafb","marker":"last_token","event":"last"}
+
+event: delta
+data: {"p":"/message/metadata/conversation_followup_suggestions_eligible","o":"replace","v":true}
+
+data: {"type":"server_ste_metadata","metadata":{"plan_type":"free","model_slug":"gpt-6-t-mini","request_id":"1107320a-5fbd-45f6-aec5-b21ac76bb9ed"},"conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f"}
+
+data: {"type":"message_stream_complete","conversation_id":"6affe1f4-6628-83e8-ac4a-cb5671bf457f"}
+
+data: [DONE]

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>cuko-api-gpt 管理台</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; background:#f5f5f5; margin:0; padding:24px; color:#222; }
+  h1 { font-size:20px; margin:0 0 16px; }
+  .card { background:#fff; border-radius:8px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #eee; }
+  th { color:#888; font-weight:500; }
+  .muted { color:#999; }
+  code { background:#f0f0f0; padding:1px 5px; border-radius:3px; font-size:12px; }
+  .empty { text-align:center; color:#999; padding:24px; }
+</style>
+</head>
+<body>
+  <h1>cuko-api-gpt 管理台</h1>
+  <div class="card">
+    <h2 style="font-size:15px; margin:0 0 12px;">账号列表</h2>
+    <table>
+      <thead>
+        <tr><th>模型 ID</th><th>显示名称</th><th>调试端口</th><th>配置方案</th></tr>
+      </thead>
+      <tbody id="listBody"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h2 style="font-size:15px; margin:0 0 8px;">API</h2>
+    <p class="muted" style="font-size:13px; margin:0;">
+      <code>GET /v1/models</code> 列账号 · <code>POST /v1/responses</code> 发消息（SSE）<br>
+      账号在 <code>data/accounts.json</code> 配置。
+    </p>
+  </div>
+<script>
+async function loadList() {
+  const tbody = document.getElementById('listBody');
+  try {
+    const res = await fetch('/api/accounts');
+    const list = await res.json();
+    if (!list.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无账号，请在 data/accounts.json 添加</td></tr>'; return; }
+    tbody.innerHTML = list.map(a =>
+      '<tr><td>' + a.modelId + '</td><td>' + (a.displayName || '-') + '</td><td>' + (a.debugPort || '-') + '</td><td>' + (a.profileName || 'default') + '</td></tr>'
+    ).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">加载失败: ' + e.message + '</td></tr>';
+  }
+}
+loadList();
+</script>
+</body>
+</html>
