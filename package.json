@@ -1,0 +1,12 @@
+{
+  "name": "cuko-api-gpt",
+  "version": "0.1.0",
+  "description": "Stateful provider that controls Chrome via CDP to expose ChatGPT web as a Cuko-compatible API",
+  "type": "module",
+  "scripts": {
+    "start": "node bridge/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
