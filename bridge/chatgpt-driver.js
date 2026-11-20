@@ -82,7 +82,11 @@ export async function fillInput(conn, text) {
     if (!input) return { ok: false, reason: 'no-input' };
     try {
       input.focus();
-      // 清空现有内容
+      // [261120-fix] 实测：
+      //  - execCommand('delete') 在 ProseMirror 有大内容时会卡死（clean-input 诊断 20s 超时）
+      //  - CHUNK=5000 分块插入会卡住（diag v4 30s 超时）
+      //  - 整块 insertText 8967 字仅 12ms（diag v5 成功）
+      // 故改为：全选（覆盖选中范围）+ 整块 insertText，不单独 delete、不分块。
       try {
         const sel = window.getSelection();
         if (sel) {
@@ -90,14 +94,9 @@ export async function fillInput(conn, text) {
           range.selectNodeContents(input);
           sel.removeAllRanges();
           sel.addRange(range);
-          document.execCommand('delete', false, undefined);
         }
       } catch (_) {}
-      // 分段插入（长文本单次可能失败）
-      const CHUNK = 5000;
-      for (let i = 0; i < text.length; i += CHUNK) {
-        document.execCommand('insertText', false, text.slice(i, i + CHUNK));
-      }
+      document.execCommand('insertText', false, text);
       try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
       // 读回校验（去空白长度）
       const norm = (s) => String(s || '').replace(/\\s+/g, '');

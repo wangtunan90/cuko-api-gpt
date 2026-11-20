@@ -141,6 +141,14 @@ export function createExtractor(reqMeta) {
   function applyOp(node) {
     if (!node || typeof node !== 'object') return;
 
+    // [261120-fix] conversation_id 挂在帧的顶层（不在 message 内部），任何帧都可能带。
+    // 之前只在 handleMessage 里从 message 取，拿不到 → sessionId 恒 null，续接失效。
+    // 实测：{"v":{"message":{...}},"conversation_id":"6affe1f4-...","error":null}
+    if (typeof node.conversation_id === 'string' && node.conversation_id) {
+      if (!msgIds) msgIds = {};
+      msgIds.conversationId = node.conversation_id;
+    }
+
     // 0) 错误信封（老协议 {error:{...}}，无 v/p）
     if (node.error !== null && node.error !== undefined &&
         node.v === undefined && node.p === undefined) { failed = true; }
