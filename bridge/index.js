@@ -118,19 +118,52 @@ async function handleCukoRequest(req, body, res) {
       throw new Error('账号未登录（URL=' + login.url + '），请先手动登录');
     }
 
-    // 3) 等输入框就绪
+    // 3) [261120-fix] 导航判断（区分新对话 / 续接）：
+    //  - 新对话（无 sessionMap 记录）→ 必须回到首页 https://chatgpt.com/
+    //    否则会接着上一个旧对话继续，而不是开新对话
+    //  - 续接（有 sessionMap 记录）→ 导航到 /c/<convId>（若当前不在该对话页）
+    // 判断必须在 waitInput 之前，因为新对话页和旧对话页都需要先导航到位再等输入框。
+    const wantConvId = sessionMap.get(cuckSessionId) || null;
+    const urlNow = (await conn.Runtime.evaluate({ expression: 'location.href', returnByValue: true })).result.value || '';
+    let needNavigate = false;
+    let targetUrl = cfg.targetUrl || 'https://chatgpt.com/';
+    if (wantConvId) {
+      // 续接：导航到指定对话页
+      if (urlNow.indexOf('/c/' + wantConvId) < 0) {
+        needNavigate = true;
+        targetUrl = 'https://chatgpt.com/c/' + wantConvId;
+      }
+    } else {
+      // 新对话：只要不在首页根路径就导航回首页
+      const isRoot = /^https:\/\/chatgpt\.com\/?(\?.*)?$/.test(urlNow);
+      if (!isRoot) {
+        needNavigate = true;
+        targetUrl = 'https://chatgpt.com/';
+      }
+    }
+    if (needNavigate) {
+      console.log('[cuko] 导航:', (wantConvId ? '续接 ' + wantConvId : '新对话'), '→', targetUrl, '（原 URL:', urlNow + '）');
+      await conn.Page.navigate({ url: targetUrl });
+      // [261120-fix] 导航后不能只固定等 2.5s —— ProseMirror 编辑器挂载有延迟，
+      // DOM 出现但 execCommand 写入无效（实测 written=0）。改为轮询 document.readyState==='complete'，
+      // 再多等 1.5s 让 React hydration 完成。
+      const navStart = Date.now();
+      let ready = false;
+      while (Date.now() - navStart < 15000) {
+        try {
+          const st = await conn.Runtime.evaluate({ expression: "document.readyState", returnByValue: true });
+          const rs = (st && st.result && st.result.value) || '';
+          if (rs === 'complete') { ready = true; break; }
+        } catch (_) {}
+        await new Promise(r => setTimeout(r, 500));
+      }
+      console.log('[cuko] 导航后 readyState:', ready ? 'complete' : 'timeout', '耗时', Date.now() - navStart, 'ms');
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    // 4) 等输入框就绪（导航后可能还在加载，waitInput 内部已轮询）
     const inputReady = await waitInput(conn, cfg.pageReadyPollMaxSec);
     if (!inputReady) throw new Error('输入框未就绪（可能未登录或页面未加载）');
-
-    // 4) 若当前不在新会话页且无法续接，导航到首页（简化：只在 URL 不是 chatgpt.com 根时导航）
-    const urlNow = (await conn.Runtime.evaluate({ expression: 'location.href', returnByValue: true })).result.value || '';
-    const onChatPage = urlNow.indexOf('chatgpt.com') >= 0 && urlNow.indexOf('/auth/') < 0;
-    if (!onChatPage) {
-      await conn.Page.navigate({ url: cfg.targetUrl });
-      await new Promise(r => setTimeout(r, 2000));
-      const ok2 = await waitInput(conn, cfg.pageReadyPollMaxSec);
-      if (!ok2) throw new Error('导航后输入框未就绪');
-    }
 
     // 5) 建立 SSE 响应头
     res.writeHead(200, {

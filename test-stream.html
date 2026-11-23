@@ -4,25 +4,38 @@
   <meta charset="UTF-8">
   <title>cuko-api-gpt 流式测试</title>
   <style>
-    body { background: #1e1e1e; color: #0f0; font-family: monospace; padding: 20px; }
-    .controls { margin-bottom: 20px; padding: 15px; background: #252526; border: 1px solid #333; border-radius: 8px; }
-    .row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
-    input, textarea { background: #1e1e1e; border: 1px solid #555; color: #fff; padding: 8px; border-radius: 4px; outline: none; }
+    body { background: #1e1e1e; color: #ccc; font-family: monospace; padding: 16px; margin: 0; }
+    h2 { color: #0f0; margin: 0 0 12px; font-size: 18px; }
+    .controls { margin-bottom: 16px; padding: 12px; background: #252526; border: 1px solid #333; border-radius: 8px; }
+    .row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
+    input, textarea { background: #1e1e1e; border: 1px solid #555; color: #fff; padding: 6px 8px; border-radius: 4px; outline: none; font-family: monospace; }
     input[type="text"] { width: 340px; }
-    textarea { flex: 1; height: 60px; resize: vertical; font-family: monospace; }
-    button { background: #0e639c; color: #fff; border: none; padding: 8px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    textarea { flex: 1; height: 56px; resize: vertical; }
+    button { background: #0e639c; color: #fff; border: none; padding: 7px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
     button:hover { background: #1177bb; }
     button:disabled { background: #555; cursor: not-allowed; }
-    #output { white-space: pre-wrap; font-size: 13px; line-height: 1.5; background: #111; padding: 15px; border-radius: 8px; min-height: 300px; }
-    .label { color: #aaa; width: 160px; }
-    .hint { color: #888; font-size: 12px; margin-left: 8px; }
+    .label { color: #aaa; width: 160px; flex-shrink: 0; }
+    .hint { color: #888; font-size: 12px; }
+    .panes { display: flex; gap: 12px; }
+    .pane { flex: 1; background: #111; border: 1px solid #333; border-radius: 8px; min-height: 360px; overflow: auto; }
+    .pane h3 { margin: 0; padding: 8px 12px; background: #1a1a1a; border-bottom: 1px solid #333; font-size: 12px; color: #888; position: sticky; top: 0; }
+    .pane .body { padding: 12px; white-space: pre-wrap; font-size: 12px; line-height: 1.5; }
+    .raw-frame { border-bottom: 1px dashed #2a2a2a; padding: 6px 0; }
+    .raw-frame .meta { color: #666; font-size: 11px; }
+    .ev-message { color: #4ec9b0; }
+    .ev-done { color: #4caf50; }
+    .ev-error { color: #f44336; }
+    .ev-other { color: #888; }
+    .data-line { color: #ce9178; word-break: break-all; }
+    #rendered { color: #d4d4d4; white-space: pre-wrap; font-size: 14px; }
     .ok { color: #4caf50; }
     .err { color: #f44336; }
+    .sep { color: #444; }
   </style>
 </head>
 <body>
   <h2>cuko-api-gpt 流式测试</h2>
-  <div class="hint" style="margin-bottom:12px;">服务地址：http://127.0.0.1:3001（改端口请改顶部常量）</div>
+  <div class="hint" style="margin-bottom:10px;">服务：http://127.0.0.1:3001（如端口不同，改脚本顶部 BASE）</div>
 
   <div class="controls">
     <div class="row">
@@ -31,30 +44,37 @@
     </div>
     <div class="row">
       <span class="label">cuckSessionId:</span>
-      <input type="text" id="cuckSessionId" placeholder="留空 = 新对话；发送后会自动填入返回的 sessionId">
-      <span class="hint">续接对话时保留它，重发即续接</span>
+      <input type="text" id="cuckSessionId" placeholder="留空 = 新对话；收到 done 后自动回填">
+      <span class="hint">续接时保留，重发即续接</span>
     </div>
     <div class="row" style="align-items:flex-start;">
-      <span class="label" style="padding-top:8px;">文本片段:</span>
+      <span class="label" style="padding-top:6px;">文本片段:</span>
       <div style="flex:1;">
         <div id="textFragments"></div>
-        <button type="button" onclick="addTextFragment()" style="margin-top:6px;background:#4caf50;font-size:12px;padding:6px 12px;">+ 添加文本片段</button>
+        <button type="button" onclick="addTextFragment()" style="margin-top:6px;background:#4caf50;font-size:12px;padding:5px 10px;">+ 添加文本片段</button>
       </div>
     </div>
     <div class="row">
       <button id="sendBtn" onclick="test()">发送请求</button>
       <button onclick="getModels()" style="background:#4caf50;">获取模型列表</button>
-      <button onclick="document.getElementById('output').textContent = ''">清空输出</button>
+      <button onclick="clearAll()">清空输出</button>
     </div>
   </div>
 
-  <div id="output"></div>
+  <div class="panes">
+    <div class="pane">
+      <h3>原始 SSE 帧（Cuko 响应格式，逐帧）</h3>
+      <div class="body" id="raw"></div>
+    </div>
+    <div class="pane">
+      <h3>渲染正文 / 状态</h3>
+      <div class="body" id="rendered"></div>
+    </div>
+  </div>
 
   <script>
-    // ===== 服务地址（如端口不同，改这里）=====
     const BASE = 'http://127.0.0.1:3001';
 
-    // 多文本片段：每条独立 textarea，发送时按顺序收集为多个 {type:'text'}
     function addTextFragment(value) {
       const host = document.getElementById('textFragments');
       const wrap = document.createElement('div');
@@ -62,14 +82,13 @@
       const ta = document.createElement('textarea');
       ta.className = 'frag-input';
       ta.placeholder = '文本片段内容...';
-      ta.style.cssText = 'flex:1;height:60px;resize:vertical;';
       if (value != null) ta.value = value;
       const del = document.createElement('button');
       del.type = 'button';
       del.textContent = '✕';
-      del.style.cssText = 'background:#a12a2a;padding:4px 10px;font-size:12px;';
+      del.style.cssText = 'background:#a12a2a;padding:3px 9px;font-size:12px;';
       del.onclick = function () {
-        if (document.querySelectorAll('.frag-input').length <= 1) return alert('至少保留一条文本片段');
+        if (document.querySelectorAll('.frag-input').length <= 1) return alert('至少保留一条');
         wrap.remove();
       };
       wrap.appendChild(ta);
@@ -86,24 +105,58 @@
       return list;
     }
 
+    function clearAll() {
+      document.getElementById('raw').innerHTML = '';
+      document.getElementById('rendered').innerHTML = '';
+    }
+
+    function esc(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+    function escText(s) {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // 往原始帧面板追加一帧（含时间戳 + event 名 + data 原文）
+    function appendRawFrame(ts, evName, dataStr) {
+      const raw = document.getElementById('raw');
+      const evClass = evName === 'message' ? 'ev-message'
+        : evName === 'done' ? 'ev-done'
+        : evName === 'error' ? 'ev-error' : 'ev-other';
+      let display = '';
+      if (evName) display += 'event: ' + evName + '\n';
+      display += 'data: ' + dataStr;
+      const div = document.createElement('div');
+      div.className = 'raw-frame';
+      div.innerHTML =
+        '<div class="meta">[' + ts + ']</div>' +
+        '<div class="' + evClass + '">' + (evName ? 'event: ' + esc(evName) : '<span class="hint">(无 event)</span>') + '</div>' +
+        '<div class="data-line">data: ' + esc(dataStr) + '</div>';
+      raw.appendChild(div);
+      raw.scrollTop = raw.scrollHeight;
+    }
+
+    // 往渲染面板更新
+    function renderPane(html) {
+      const r = document.getElementById('rendered');
+      r.innerHTML = html;
+    }
+
     async function getModels() {
-      const out = document.getElementById('output');
-      out.textContent = '正在请求 GET /v1/models ...\n\n';
+      clearAll();
+      renderPane('正在请求 GET /v1/models ...');
       try {
         const res = await fetch(BASE + '/v1/models');
         const data = await res.json();
-        out.textContent += JSON.stringify(data, null, 2);
-        // 若模型 ID 为空，用第一个
-        if (data && data.data && data.data.length && !document.getElementById('modelId').value.trim()) {
-          document.getElementById('modelId').value = data.data[0].id;
-        }
+        renderPane('<div class="ok">GET /v1/models 响应：</div>\n' + escText(JSON.stringify(data, null, 2)));
       } catch (e) {
-        out.textContent += '请求异常: ' + e.message;
+        renderPane('<div class="err">请求异常: ' + escText(e.message) + '</div>');
       }
     }
 
     async function test() {
-      const out = document.getElementById('output');
       const model = document.getElementById('modelId').value.trim();
       const cuckSessionId = document.getElementById('cuckSessionId').value.trim();
       const textFragments = collectTextFragments();
@@ -111,31 +164,22 @@
 
       if (!model || textFragments.length === 0) return alert('请填写模型 ID 和至少一条文本片段');
 
-      out.textContent = '处理中...\n';
-      out.textContent += '【文本片段】共 ' + textFragments.length + ' 条\n';
+      clearAll();
       btn.disabled = true;
       btn.textContent = '请求中...';
+      renderPane('<div class="hint">处理中...</div>');
 
       const inputArray = textFragments.map(function (t) { return { type: 'text', text: t }; });
-      out.textContent += 'input 摘要: ' + inputArray.map(function (x) {
-        return 'text[' + x.text.length + ']=' + JSON.stringify(x.text.slice(0, 20));
-      }).join(', ') + '\n';
-
       const bodyData = {
         model: model,
         requestId: 'r_' + Date.now(),
         input: inputArray,
       };
-      if (cuckSessionId) {
-        bodyData.cuckSessionId = cuckSessionId;
-      } else {
-        bodyData.cuckSessionId = 't_' + Date.now();
-      }
-
-      out.textContent += '发送请求中（SSE）...\n\n';
+      bodyData.cuckSessionId = cuckSessionId || ('t_' + Date.now());
 
       let accText = '';
       let gotDone = false;
+      const t0 = Date.now();
 
       try {
         const res = await fetch(BASE + '/v1/responses', {
@@ -146,25 +190,29 @@
 
         if (!res.ok) {
           const err = await res.text();
-          out.textContent += 'HTTP ' + res.status + ': ' + err + '\n';
+          renderPane('<div class="err">HTTP ' + res.status + ': ' + escText(err) + '</div>');
           return;
         }
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = '';
+        let frameCount = 0;
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           buf += decoder.decode(value, { stream: true });
 
-          // 按空行切 SSE 帧
           let idx;
           while ((idx = buf.indexOf('\n\n')) >= 0) {
             const frame = buf.slice(0, idx);
             buf = buf.slice(idx + 2);
             if (!frame.trim()) continue;
+            // 跳过 keepalive 注释帧（: keepalive）
+            if (frame.trim().startsWith(':')) continue;
+
+            frameCount++;
             const lines = frame.split('\n');
             let evName = '';
             let dataStr = '';
@@ -172,60 +220,55 @@
               if (line.startsWith('event:')) evName = line.slice(6).trim();
               else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
             }
-            if (!dataStr) {
-              // 可能是 keepalive 注释帧（: keepalive）
-              continue;
-            }
+            if (!dataStr) continue;
+
+            const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+            // 原始帧面板：逐帧显示
+            appendRawFrame(ts, evName, dataStr);
+
             let parsed;
             try { parsed = JSON.parse(dataStr); } catch (e) { parsed = null; }
-            const t = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
 
             if (evName === 'message' && parsed && parsed.delta) {
               accText += parsed.delta;
-              // 实时渲染正文（覆盖整个输出，不刷帧原文，避免太长）
-              out.innerHTML =
-                '<div class="ok">【正文】</div>\n' + escapeHtml(accText) +
-                '\n\n<div class="hint">（流式接收中，已收 ' + accText.length + ' 字）</div>';
+              renderPane(
+                '<div class="ok">【正文】</div>\n' + escText(accText) +
+                '\n\n<div class="hint">流式接收中，已收 ' + accText.length + ' 字，' + (Date.now() - t0) + 'ms</div>'
+              );
             } else if (evName === 'done' && parsed) {
               gotDone = true;
               const sid = parsed.sessionId || '';
-              if (sid) {
-                document.getElementById('cuckSessionId').value = sid;
-              }
-              out.innerHTML =
-                '<div class="ok">【正文】</div>\n' + escapeHtml(accText) +
+              if (sid) document.getElementById('cuckSessionId').value = sid;
+              renderPane(
+                '<div class="ok">【正文】</div>\n' + escText(accText) +
                 '\n\n<div class="ok">【done】</div>\n' +
-                'finishReason: ' + (parsed.finishReason || '?') + '\n' +
-                'sessionId: ' + (sid || '(null)') + '\n' +
-                (sid ? '<div class="ok">✅ 已自动填入 cuckSessionId，下次发送即续接</div>' : '<div class="err">⚠️ 未拿到 sessionId</div>');
+                'finishReason: ' + escText(parsed.finishReason || '?') + '\n' +
+                'sessionId: ' + escText(sid || '(null)') + '\n' +
+                '耗时: ' + (Date.now() - t0) + 'ms' + '\n' +
+                '共收到 ' + frameCount + ' 帧\n' +
+                (sid ? '<div class="ok">✅ 已自动填入 cuckSessionId，下次发送即续接</div>' : '<div class="err">⚠️ 未拿到 sessionId</div>')
+              );
             } else if (evName === 'error' && parsed) {
-              out.textContent += '\n[' + t + '] ERROR: ' + JSON.stringify(parsed) + '\n';
-            } else {
-              out.textContent += '[' + t + '] ' + evName + ' ' + dataStr + '\n';
+              renderPane(
+                '<div class="err">【error】</div>\n' + escText(dataStr) +
+                (accText ? ('\n\n<div class="ok">【部分正文】</div>\n' + escText(accText)) : '')
+              );
             }
           }
-          window.scrollTo(0, document.body.scrollHeight);
         }
 
         if (!gotDone) {
-          out.textContent += '\n⚠️ 流已结束但未收到 done 帧\n';
+          renderPane('<div class="err">⚠️ 流已结束但未收到 done 帧</div>' +
+            (accText ? ('\n\n<div class="ok">【正文】</div>\n' + escText(accText)) : ''));
         }
       } catch (e) {
-        out.textContent += '\n请求异常: ' + e.message;
+        renderPane('<div class="err">请求异常: ' + escText(e.message) + '</div>');
       } finally {
         btn.disabled = false;
         btn.textContent = '发送请求';
       }
     }
 
-    function escapeHtml(s) {
-      return String(s || '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
-        .replace(/\n/g, '<br>');
-    }
-
-    // 初始：默认一条文本片段
     addTextFragment('用一句话介绍你自己。');
   </script>
 </body>

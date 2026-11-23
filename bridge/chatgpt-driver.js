@@ -66,7 +66,23 @@ export async function waitInput(conn, maxSec) {
  * 填入文本（execCommand insertText 分段）。返回 { ok, written, expected }。
  * 注意：ProseMirror 合成 paste 会被识别为附件，必须用 insertText。
  */
-export async function fillInput(conn, text) {
+export async function fillInput(conn, text, maxRetries) {
+  const retries = Math.max(1, maxRetries || 3);
+  let last = { ok: false, reason: 'no-attempt' };
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    last = await fillInputOnce(conn, text);
+    // [261120-fix] 导航后 ProseMirror 可能还没挂载完，DOM 在但 execCommand 无效。
+    // written < 90% 视为失败，等 1.5s 重试（页面初始化通常 2-5s 完成）。
+    if (last && last.ok) return last;
+    if (attempt < retries) {
+      console.log('[driver] fillInput 第 ' + attempt + ' 次失败（written=' + (last.written || 0) + '/' + (last.expected || '?') + '），1.5s 后重试');
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+  return last;
+}
+
+async function fillInputOnce(conn, text) {
   const expr = `(() => {
     const text = ${JSON.stringify(text)};
     const sels = ${JSON.stringify(INPUT_SELECTORS)};
