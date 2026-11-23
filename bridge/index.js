@@ -6,7 +6,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR, readUiIndexHtml } from './app-paths.js';
+import { DATA_DIR, APP_ROOT, readUiIndexHtml } from './app-paths.js';
 import { resolveProfile, launchChrome, waitPort, activeModels, PORT, getAccounts, saveAccounts } from './core.js';
 import { randomInRange } from './default-config.js';
 import { closeAllConnections } from './cdp-connection.js';
@@ -354,6 +354,19 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end('<h1>cuko-api-gpt</h1><p>UI 未就绪。API: GET /v1/models, POST /v1/responses</p>');
+      }
+      return;
+    }
+
+    // [261120] 测试页：test-stream.html（项目根目录）
+    if (req.method === 'GET' && pathname === '/test-stream.html') {
+      try {
+        const html = fs.readFileSync(path.join(APP_ROOT, 'test-stream.html'), 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } catch (e) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('test-stream.html 读取失败: ' + e.message);
       }
       return;
     }

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>cuko-api-gpt 流式测试</title>
+  <style>
+    body { background: #1e1e1e; color: #0f0; font-family: monospace; padding: 20px; }
+    .controls { margin-bottom: 20px; padding: 15px; background: #252526; border: 1px solid #333; border-radius: 8px; }
+    .row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
+    input, textarea { background: #1e1e1e; border: 1px solid #555; color: #fff; padding: 8px; border-radius: 4px; outline: none; }
+    input[type="text"] { width: 340px; }
+    textarea { flex: 1; height: 60px; resize: vertical; font-family: monospace; }
+    button { background: #0e639c; color: #fff; border: none; padding: 8px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    button:hover { background: #1177bb; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    #output { white-space: pre-wrap; font-size: 13px; line-height: 1.5; background: #111; padding: 15px; border-radius: 8px; min-height: 300px; }
+    .label { color: #aaa; width: 160px; }
+    .hint { color: #888; font-size: 12px; margin-left: 8px; }
+    .ok { color: #4caf50; }
+    .err { color: #f44336; }
+  </style>
+</head>
+<body>
+  <h2>cuko-api-gpt 流式测试</h2>
+  <div class="hint" style="margin-bottom:12px;">服务地址：http://127.0.0.1:3001（改端口请改顶部常量）</div>
+
+  <div class="controls">
+    <div class="row">
+      <span class="label">模型 ID (必填):</span>
+      <input type="text" id="modelId" value="gpt-account-1">
+    </div>
+    <div class="row">
+      <span class="label">cuckSessionId:</span>
+      <input type="text" id="cuckSessionId" placeholder="留空 = 新对话；发送后会自动填入返回的 sessionId">
+      <span class="hint">续接对话时保留它，重发即续接</span>
+    </div>
+    <div class="row" style="align-items:flex-start;">
+      <span class="label" style="padding-top:8px;">文本片段:</span>
+      <div style="flex:1;">
+        <div id="textFragments"></div>
+        <button type="button" onclick="addTextFragment()" style="margin-top:6px;background:#4caf50;font-size:12px;padding:6px 12px;">+ 添加文本片段</button>
+      </div>
+    </div>
+    <div class="row">
+      <button id="sendBtn" onclick="test()">发送请求</button>
+      <button onclick="getModels()" style="background:#4caf50;">获取模型列表</button>
+      <button onclick="document.getElementById('output').textContent = ''">清空输出</button>
+    </div>
+  </div>
+
+  <div id="output"></div>
+
+  <script>
+    // ===== 服务地址（如端口不同，改这里）=====
+    const BASE = 'http://127.0.0.1:3001';
+
+    // 多文本片段：每条独立 textarea，发送时按顺序收集为多个 {type:'text'}
+    function addTextFragment(value) {
+      const host = document.getElementById('textFragments');
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;align-items:flex-start;';
+      const ta = document.createElement('textarea');
+      ta.className = 'frag-input';
+      ta.placeholder = '文本片段内容...';
+      ta.style.cssText = 'flex:1;height:60px;resize:vertical;';
+      if (value != null) ta.value = value;
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '✕';
+      del.style.cssText = 'background:#a12a2a;padding:4px 10px;font-size:12px;';
+      del.onclick = function () {
+        if (document.querySelectorAll('.frag-input').length <= 1) return alert('至少保留一条文本片段');
+        wrap.remove();
+      };
+      wrap.appendChild(ta);
+      wrap.appendChild(del);
+      host.appendChild(wrap);
+    }
+
+    function collectTextFragments() {
+      const list = [];
+      document.querySelectorAll('.frag-input').forEach(function (ta) {
+        const v = ta.value.trim();
+        if (v) list.push(v);
+      });
+      return list;
+    }
+
+    async function getModels() {
+      const out = document.getElementById('output');
+      out.textContent = '正在请求 GET /v1/models ...\n\n';
+      try {
+        const res = await fetch(BASE + '/v1/models');
+        const data = await res.json();
+        out.textContent += JSON.stringify(data, null, 2);
+        // 若模型 ID 为空，用第一个
+        if (data && data.data && data.data.length && !document.getElementById('modelId').value.trim()) {
+          document.getElementById('modelId').value = data.data[0].id;
+        }
+      } catch (e) {
+        out.textContent += '请求异常: ' + e.message;
+      }
+    }
+
+    async function test() {
+      const out = document.getElementById('output');
+      const model = document.getElementById('modelId').value.trim();
+      const cuckSessionId = document.getElementById('cuckSessionId').value.trim();
+      const textFragments = collectTextFragments();
+      const btn = document.getElementById('sendBtn');
+
+      if (!model || textFragments.length === 0) return alert('请填写模型 ID 和至少一条文本片段');
+
+      out.textContent = '处理中...\n';
+      out.textContent += '【文本片段】共 ' + textFragments.length + ' 条\n';
+      btn.disabled = true;
+      btn.textContent = '请求中...';
+
+      const inputArray = textFragments.map(function (t) { return { type: 'text', text: t }; });
+      out.textContent += 'input 摘要: ' + inputArray.map(function (x) {
+        return 'text[' + x.text.length + ']=' + JSON.stringify(x.text.slice(0, 20));
+      }).join(', ') + '\n';
+
+      const bodyData = {
+        model: model,
+        requestId: 'r_' + Date.now(),
+        input: inputArray,
+      };
+      if (cuckSessionId) {
+        bodyData.cuckSessionId = cuckSessionId;
+      } else {
+        bodyData.cuckSessionId = 't_' + Date.now();
+      }
+
+      out.textContent += '发送请求中（SSE）...\n\n';
+
+      let accText = '';
+      let gotDone = false;
+
+      try {
+        const res = await fetch(BASE + '/v1/responses', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(bodyData),
+        });
+
+        if (!res.ok) {
+          const err = await res.text();
+          out.textContent += 'HTTP ' + res.status + ': ' + err + '\n';
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+
+          // 按空行切 SSE 帧
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            if (!frame.trim()) continue;
+            const lines = frame.split('\n');
+            let evName = '';
+            let dataStr = '';
+            for (const line of lines) {
+              if (line.startsWith('event:')) evName = line.slice(6).trim();
+              else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+            }
+            if (!dataStr) {
+              // 可能是 keepalive 注释帧（: keepalive）
+              continue;
+            }
+            let parsed;
+            try { parsed = JSON.parse(dataStr); } catch (e) { parsed = null; }
+            const t = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+
+            if (evName === 'message' && parsed && parsed.delta) {
+              accText += parsed.delta;
+              // 实时渲染正文（覆盖整个输出，不刷帧原文，避免太长）
+              out.innerHTML =
+                '<div class="ok">【正文】</div>\n' + escapeHtml(accText) +
+                '\n\n<div class="hint">（流式接收中，已收 ' + accText.length + ' 字）</div>';
+            } else if (evName === 'done' && parsed) {
+              gotDone = true;
+              const sid = parsed.sessionId || '';
+              if (sid) {
+                document.getElementById('cuckSessionId').value = sid;
+              }
+              out.innerHTML =
+                '<div class="ok">【正文】</div>\n' + escapeHtml(accText) +
+                '\n\n<div class="ok">【done】</div>\n' +
+                'finishReason: ' + (parsed.finishReason || '?') + '\n' +
+                'sessionId: ' + (sid || '(null)') + '\n' +
+                (sid ? '<div class="ok">✅ 已自动填入 cuckSessionId，下次发送即续接</div>' : '<div class="err">⚠️ 未拿到 sessionId</div>');
+            } else if (evName === 'error' && parsed) {
+              out.textContent += '\n[' + t + '] ERROR: ' + JSON.stringify(parsed) + '\n';
+            } else {
+              out.textContent += '[' + t + '] ' + evName + ' ' + dataStr + '\n';
+            }
+          }
+          window.scrollTo(0, document.body.scrollHeight);
+        }
+
+        if (!gotDone) {
+          out.textContent += '\n⚠️ 流已结束但未收到 done 帧\n';
+        }
+      } catch (e) {
+        out.textContent += '\n请求异常: ' + e.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '发送请求';
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+        .replace(/\n/g, '<br>');
+    }
+
+    // 初始：默认一条文本片段
+    addTextFragment('用一句话介绍你自己。');
+  </script>
+</body>
+</html>
