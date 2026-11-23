@@ -69,6 +69,9 @@ class CdpConnection {
       await this.connecting;
     } catch (e) {
       this.connecting = null;
+      if (e && typeof e === 'object' && !e.code) {
+        e.code = 'provider_unavailable';
+      }
       throw e;
     } finally {
       this.connecting = null;

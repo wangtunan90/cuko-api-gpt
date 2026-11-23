@@ -6,6 +6,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { DATA_DIR, APP_ROOT, readUiIndexHtml } from './app-paths.js';
 import { resolveProfile, launchChrome, waitPort, activeModels, PORT, getAccounts, saveAccounts } from './core.js';
 import { randomInRange } from './default-config.js';
@@ -17,8 +18,11 @@ import { probeInput, waitInput, fillInput, findSendButton, inputLength, triggerS
 
 const TMP_DIR = path.join(DATA_DIR, 'tmp');
 
-/** 会话 id 映射（cuckSessionId -> chatgpt conversation_id），用于续接 */
-const sessionMap = new Map();
+/** Provider 会话映射（providerSessionId -> ChatGPT 会话信息） */
+const providerSessions = new Map();
+
+/** 已处理的 requestId，用于幂等检查 */
+const processedRequestIds = new Set();
 
 /** URL 匹配：POST /backend-api/(f/)?conversation */
 const CONVERSATION_RE = /\/backend-api\/(?:f\/)?conversation\/?$/;
@@ -31,17 +35,41 @@ function isConversationRequest(url, method) {
   } catch (_) { return false; }
 }
 
-/** 规范化 input items：取文本拼接 */
+/** 规范化协议 input：当前版本仅支持 text，文件输入明确报错 */
 function normalizeInputItems(input) {
   const out = [];
   if (!Array.isArray(input)) return out;
   for (const it of input) {
-    if (!it || typeof it !== 'object') continue;
-    if ((it.type === 'text' || it.type === 'input_text' || it.type === 'user') && typeof it.text === 'string') {
+    if (!it || typeof it !== 'object' || Array.isArray(it)) continue;
+    if (it.type === 'text' && typeof it.text === 'string') {
       out.push(it.text);
     }
   }
   return out;
+}
+
+/** 返回协议规定的 HTTP 错误 */
+function sendHttpError(res, status, code, message) {
+  if (res.headersSent || res.writableEnded) return;
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({ code, message }));
+}
+
+/** 无法取得真实 Token 数时，按字符数估算 */
+function estimateTokens(value) {
+  const text = String(value || '');
+  let count = 0;
+  let latinRun = 0;
+  for (const ch of text) {
+    if (/[\u3400-\u9fff\uf900-\ufaff]/.test(ch)) {
+      count += Math.ceil(latinRun / 4);
+      latinRun = 0;
+      count += 1;
+    } else {
+      latinRun += 1;
+    }
+  }
+  return count + Math.ceil(latinRun / 4);
 }
 
 /** SSE 帧写出 */
@@ -56,29 +84,74 @@ function writeSse(res, event, data) {
 /** 处理一次 Cuko 请求 */
 async function handleCukoRequest(req, body, res) {
   const payload = body || {};
-  const modelId = payload.model;
-  const cuckSessionId = payload.cuckSessionId || payload.requestId || String(Date.now());
-  const requestId = payload.requestId || cuckSessionId;
+  const modelId = typeof payload.model === 'string' ? payload.model.trim() : '';
+  const cuckSessionId = typeof payload.cuckSessionId === 'string' ? payload.cuckSessionId.trim() : '';
+  const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
+  const providerSessionId = typeof payload.providerSessionId === 'string' && payload.providerSessionId.trim()
+    ? payload.providerSessionId.trim()
+    : null;
+  const requestType = payload.type || 'user';
+
+  if (!cuckSessionId || !modelId || !requestId || !Array.isArray(payload.input)) {
+    sendHttpError(res, 400, 'invalid_request', 'cuckSessionId、model、requestId 和 input（数组）均为必填项');
+    return;
+  }
+  if (!['user', 'tool', 'compress'].includes(requestType)) {
+    sendHttpError(res, 400, 'invalid_request', 'type 仅支持 user、tool、compress');
+    return;
+  }
+  if (requestType === 'compress' && providerSessionId) {
+    sendHttpError(res, 400, 'invalid_request', 'compress 请求不得携带 providerSessionId');
+    return;
+  }
+  if (payload.input.some(it => !it || typeof it !== 'object' || it.type !== 'text' || typeof it.text !== 'string')) {
+    sendHttpError(res, 400, 'invalid_request', '当前 Provider 版本仅支持 type=text 的输入项，暂不支持文件输入');
+    return;
+  }
+
   const texts = normalizeInputItems(payload.input);
   const userText = texts.join('\n').trim();
+  if (!userText) {
+    sendHttpError(res, 400, 'invalid_request', 'input 中至少需要一条非空文本');
+    return;
+  }
+
+  if (processedRequestIds.has(requestId)) {
+    sendHttpError(res, 409, 'idempotency_conflict', 'requestId 已处理，不允许重复提交');
+    return;
+  }
+
+  const existingSession = providerSessionId ? providerSessions.get(providerSessionId) : null;
+  if (providerSessionId && !existingSession) {
+    sendHttpError(res, 400, 'invalid_request', 'providerSessionId 不存在或已失效，请重新创建会话');
+    return;
+  }
+  if (existingSession && existingSession.cuckSessionId !== cuckSessionId) {
+    sendHttpError(res, 400, 'invalid_request', 'providerSessionId 与 cuckSessionId 不匹配');
+    return;
+  }
+  if (existingSession && existingSession.modelId !== modelId) {
+    sendHttpError(res, 400, 'invalid_request', '续接会话时 model 必须与原会话一致；切换模型请使用 compress');
+    return;
+  }
 
   const account = getAccounts().find(a => a.modelId === modelId);
   if (!account) {
-    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ error: 'Model not found' }));
+    sendHttpError(res, 400, 'invalid_request', 'Model not found: ' + modelId);
     return;
   }
   if (activeModels.has(modelId)) {
-    res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ code: 'rate_limit_exceeded', message: '该账号正在处理另一请求' }));
-    return;
-  }
-  if (!userText) {
-    res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ error: 'empty input' }));
+    sendHttpError(res, 429, 'rate_limit_exceeded', '该账号正在处理另一请求');
     return;
   }
 
+  processedRequestIds.add(requestId);
+  if (processedRequestIds.size > 10000) {
+    processedRequestIds.delete(processedRequestIds.values().next().value);
+  }
+
+  const responseProviderSessionId = providerSessionId || randomUUID();
+  const inputTokens = estimateTokens(userText);
   activeModels.add(modelId);
   const cfg = resolveProfile(account).values;
 
@@ -98,24 +171,44 @@ async function handleCukoRequest(req, body, res) {
     if (totalTimer) { clearTimeout(totalTimer); totalTimer = null; }
     if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; }
   };
+  const shouldAbort = () => aborted || dispatched;
+
+    // 客户端断开 → 中止（提前注册，覆盖连接、导航和输入框等待阶段）
+    res.on('close', () => {
+      if (!dispatched) {
+        console.log('[cuko] 客户端断开');
+        aborted = true;
+        clearAllTimers();
+        try { if (scope) scope.close(); } catch (_) {}
+        activeModels.delete(modelId);
+        dispatched = true;
+      }
+    });
 
   try {
     // 1) 拿连接（端口不通则启动 Chrome）
     let conn;
     try {
       conn = await getConnection(account);
+      if (shouldAbort()) return;
     } catch (e) {
+      if (shouldAbort()) return;
       console.log('[cuko] 连接失败，启动 Chrome:', account.modelId);
       launchChrome(account, cfg.targetUrl, cfg);
       const ok = await waitPort(account, cfg.connectPollMaxSec);
-      if (!ok) throw new Error('Chrome 启动超时');
+      if (shouldAbort()) return;
+      if (!ok) { const e = new Error('Chrome 启动超时'); e.code = 'provider_unavailable'; throw e; }
       conn = await getConnection(account);
+      if (shouldAbort()) return;
     }
 
     // 2) 登录态检查
     const login = await checkLogin(conn);
+    if (shouldAbort()) return;
     if (login.loggedOut) {
-      throw new Error('账号未登录（URL=' + login.url + '），请先手动登录');
+      const error = new Error('账号未登录（URL=' + login.url + '），请先手动登录');
+      error.code = 'authentication_required';
+      throw error;
     }
 
     // 3) [261120-fix] 导航判断（区分新对话 / 续接）：
@@ -123,8 +216,9 @@ async function handleCukoRequest(req, body, res) {
     //    否则会接着上一个旧对话继续，而不是开新对话
     //  - 续接（有 sessionMap 记录）→ 导航到 /c/<convId>（若当前不在该对话页）
     // 判断必须在 waitInput 之前，因为新对话页和旧对话页都需要先导航到位再等输入框。
-    const wantConvId = sessionMap.get(cuckSessionId) || null;
+    const wantConvId = existingSession ? existingSession.conversationId : null;
     const urlNow = (await conn.Runtime.evaluate({ expression: 'location.href', returnByValue: true })).result.value || '';
+    if (shouldAbort()) return;
     let needNavigate = false;
     let targetUrl = cfg.targetUrl || 'https://chatgpt.com/';
     if (wantConvId) {
@@ -144,14 +238,17 @@ async function handleCukoRequest(req, body, res) {
     if (needNavigate) {
       console.log('[cuko] 导航:', (wantConvId ? '续接 ' + wantConvId : '新对话'), '→', targetUrl, '（原 URL:', urlNow + '）');
       await conn.Page.navigate({ url: targetUrl });
+      if (shouldAbort()) return;
       // [261120-fix] 导航后不能只固定等 2.5s —— ProseMirror 编辑器挂载有延迟，
       // DOM 出现但 execCommand 写入无效（实测 written=0）。改为轮询 document.readyState==='complete'，
       // 再多等 1.5s 让 React hydration 完成。
       const navStart = Date.now();
       let ready = false;
       while (Date.now() - navStart < 15000) {
+        if (shouldAbort()) return;
         try {
           const st = await conn.Runtime.evaluate({ expression: "document.readyState", returnByValue: true });
+          if (shouldAbort()) return;
           const rs = (st && st.result && st.result.value) || '';
           if (rs === 'complete') { ready = true; break; }
         } catch (_) {}
@@ -159,11 +256,14 @@ async function handleCukoRequest(req, body, res) {
       }
       console.log('[cuko] 导航后 readyState:', ready ? 'complete' : 'timeout', '耗时', Date.now() - navStart, 'ms');
       await new Promise(r => setTimeout(r, 1500));
+      if (shouldAbort()) return;
     }
 
     // 4) 等输入框就绪（导航后可能还在加载，waitInput 内部已轮询）
+    if (shouldAbort()) return;
     const inputReady = await waitInput(conn, cfg.pageReadyPollMaxSec);
-    if (!inputReady) throw new Error('输入框未就绪（可能未登录或页面未加载）');
+    if (shouldAbort()) return;
+    if (!inputReady) { const e = new Error('输入框未就绪（可能未登录或页面未加载）'); e.code = 'provider_unavailable'; throw e; }
 
     // 5) 建立 SSE 响应头
     res.writeHead(200, {
@@ -202,11 +302,18 @@ async function handleCukoRequest(req, body, res) {
     };
 
     const recordSession = () => {
-      const convId = extractor.msgIds && extractor.msgIds.conversationId;
-      if (convId) sessionMap.set(cuckSessionId, convId);
+      const convId = (extractor.msgIds && extractor.msgIds.conversationId)
+        || (existingSession && existingSession.conversationId);
+      if (convId) {
+        providerSessions.set(responseProviderSessionId, {
+          conversationId: convId,
+          cuckSessionId,
+          modelId,
+        });
+      }
     };
 
-    const finishStream = () => {
+    const finishStream = (errorCode = null, errorMessage = null) => {
       if (dispatched) return;
       dispatched = true;
       clearAllTimers();
@@ -215,23 +322,44 @@ async function handleCukoRequest(req, body, res) {
         for (const f of rest) flushFrame(f);
       } catch (_) {}
       recordSession();
-      // 推正文
-      if (extractor.textLen > 0) {
-        writeSse(res, 'message', {
-          id: 'msg_' + requestId,
-          object: 'response.output_text.delta',
-          delta: extractor.text,
+      const sessionReady = providerSessions.has(responseProviderSessionId);
+
+      const status = resolveStatus(extractor, aborted);
+      const finalErrorCode = errorCode || (timedOut ? 'request_timeout' : null);
+      const finalErrorMessage = errorMessage || (timedOut
+        ? '响应超时，内容可能不完整'
+        : null);
+
+      if (finalErrorCode || status === 'error' || status === 'stopped' || !sessionReady) {
+        writeSse(res, 'error', {
+          code: finalErrorCode || 'provider_unavailable',
+          message: finalErrorMessage || (!sessionReady
+            ? '未能获取 ChatGPT conversation_id，无法建立可续接的 Provider 会话'
+            : status === 'stopped'
+              ? '生成已中断'
+              : 'Provider 未能生成有效响应'),
+        });
+      } else {
+        if (extractor.textLen > 0) {
+          writeSse(res, 'message', {
+            cuckSessionId,
+            providerSessionId: responseProviderSessionId,
+            output: [extractor.text],
+          });
+        }
+
+        const outputTokens = estimateTokens(extractor.text);
+        writeSse(res, 'done', {
+          finishReason: 'stop',
+          usage: {
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+            total_tokens: inputTokens + outputTokens,
+          },
+          providerSessionId: responseProviderSessionId,
         });
       }
-      // 超时推 error
-      if (timedOut) {
-        writeSse(res, 'error', { code: 'request_timeout', message: '响应超时，内容可能不完整' });
-      }
-      writeSse(res, 'done', {
-        finishReason: timedOut ? 'timeout' : (resolveStatus(extractor, aborted) === 'error' ? 'error' : 'stop'),
-        usage: { total_tokens: 0 },
-        sessionId: sessionMap.get(cuckSessionId) || null,
-      });
+
       try { res.end(); } catch (_) {}
       try { if (scope) scope.close(); } catch (_) {}
       activeModels.delete(modelId);
@@ -241,7 +369,7 @@ async function handleCukoRequest(req, body, res) {
       if (dispatched) return;
       timedOut = true;
       console.warn('[cuko] ' + reason + '，强制结束');
-      finishStream();
+      finishStream('request_timeout', reason);
     };
     const resetIdle = () => {
       if (idleTimer) clearTimeout(idleTimer);
@@ -301,20 +429,10 @@ async function handleCukoRequest(req, body, res) {
     scope.Network.loadingFailed((params) => {
       if (!targetRequestId || params.requestId !== targetRequestId) return;
       console.warn('[cuko] conversation 加载失败:', params.errorText);
-      finishStream();
+      finishStream('provider_unavailable', 'ChatGPT 请求失败: ' + (params.errorText || '未知错误'));
     });
 
-    // 客户端断开 → 中止
-    res.on('close', () => {
-      if (!dispatched) {
-        console.log('[cuko] 客户端断开');
-        aborted = true;
-        clearAllTimers();
-        try { if (scope) scope.close(); } catch (_) {}
-        activeModels.delete(modelId);
-        dispatched = true;
-      }
-    });
+
 
     // 7) 心跳 + 总超时
     keepAliveTimer = setInterval(() => {
@@ -324,22 +442,27 @@ async function handleCukoRequest(req, body, res) {
 
     // 8) 填文本 + 点击发送
     console.log('[cuko] 填文本:', userText.length, '字');
-    const fill = await fillInput(conn, userText);
-    if (!fill.ok) throw new Error('填入文本失败: ' + JSON.stringify(fill));
+    const fill = await fillInput(conn, userText, undefined, shouldAbort);
+    if (shouldAbort()) return;
+    if (!fill.ok) { const e = new Error('填入文本失败: ' + JSON.stringify(fill)); e.code = 'provider_unavailable'; throw e; }
     // 粘贴后短暂等待（让 ProseMirror 处理）
     await new Promise(r => setTimeout(r, randomInRange(cfg.preEnterWaitMinSec, cfg.preEnterWaitMaxSec)));
+    if (shouldAbort()) return;
 
     console.log('[cuko] 触发发送');
-    const send = await triggerSend(conn, 10000);
-    if (!send.ok) throw new Error('发送失败（输入框未被清空）');
+    const send = await triggerSend(conn, 10000, shouldAbort);
+    if (shouldAbort()) return;
+    if (!send.ok) { const e = new Error('发送失败（输入框未被清空）'); e.code = 'provider_unavailable'; throw e; }
     console.log('[cuko] 已发送，method=' + send.method);
 
     // 等拦截到 conversation 请求（最多 30s）
     const waitStart = Date.now();
     while (!targetRequestId && Date.now() - waitStart < 30000) {
+      if (shouldAbort()) return;
       await new Promise(r => setTimeout(r, 500));
+      if (shouldAbort()) return;
     }
-    if (!targetRequestId) throw new Error('30s 内未拦截到 conversation 请求');
+    if (!targetRequestId) { const e = new Error('30s 内未拦截到 conversation 请求'); e.code = 'provider_unavailable'; throw e; }
 
     // 到此进入流式等待（由 dataReceived / loadingFinished 驱动 finishStream）
   } catch (e) {
@@ -350,12 +473,12 @@ async function handleCukoRequest(req, body, res) {
     if (!dispatched) {
       dispatched = true;
       try {
+        const errorCode = e.code || 'internal_error';
+        const errorMessage = e.message || 'Provider 内部错误';
         if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ code: 'provider_error', message: e.message }));
+          sendHttpError(res, errorCode === 'authentication_required' ? 401 : 500, errorCode, errorMessage);
         } else {
-          writeSse(res, 'error', { code: 'provider_error', message: e.message });
-          writeSse(res, 'done', { finishReason: 'error' });
+          writeSse(res, 'error', { code: errorCode, message: errorMessage });
           res.end();
         }
       } catch (_) {}
@@ -409,12 +532,10 @@ const server = http.createServer(async (req, res) => {
       const accounts = getAccounts();
       const data = accounts.map(a => ({
         id: a.modelId,
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'cuko-api-gpt',
+        name: a.modelId,
       }));
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ object: 'list', data }));
+      res.end(JSON.stringify({ data }));
       return;
     }
 
@@ -423,8 +544,7 @@ const server = http.createServer(async (req, res) => {
       const raw = await readBody(req);
       let body;
       try { body = JSON.parse(raw || '{}'); } catch (_) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'invalid json' }));
+        sendHttpError(res, 400, 'invalid_request', '请求体不是有效 JSON');
         return;
       }
       await handleCukoRequest(req, body, res);
@@ -447,7 +567,17 @@ const server = http.createServer(async (req, res) => {
     res.end('Not Found');
   } catch (e) {
     console.error('[http] 错误:', e.message);
-    try { if (!res.headersSent) { res.writeHead(500); res.end('internal error'); } } catch (_) {}
+    try {
+      const message = e.message || 'HTTP 服务内部错误';
+      if (!res.headersSent && !res.writableEnded) {
+        sendHttpError(res, 500, 'internal_error', message);
+      } else if (!res.writableEnded) {
+        if (req.method === 'POST' && pathname === '/v1/responses') {
+          writeSse(res, 'error', { code: 'internal_error', message });
+        }
+        res.end();
+      }
+    } catch (_) {}
   }
 });
 

@@ -8,7 +8,8 @@
     h2 { color: #0f0; margin: 0 0 12px; font-size: 18px; }
     .controls { margin-bottom: 16px; padding: 12px; background: #252526; border: 1px solid #333; border-radius: 8px; }
     .row { display: flex; gap: 10px; margin-bottom: 8px; align-items: center; }
-    input, textarea { background: #1e1e1e; border: 1px solid #555; color: #fff; padding: 6px 8px; border-radius: 4px; outline: none; font-family: monospace; }
+    input, textarea, select { background: #1e1e1e; border: 1px solid #555; color: #fff; padding: 6px 8px; border-radius: 4px; outline: none; font-family: monospace; }
+    select { min-width: 260px; }
     input[type="text"] { width: 340px; }
     textarea { flex: 1; height: 56px; resize: vertical; }
     button { background: #0e639c; color: #fff; border: none; padding: 7px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
@@ -44,8 +45,22 @@
     </div>
     <div class="row">
       <span class="label">cuckSessionId:</span>
-      <input type="text" id="cuckSessionId" placeholder="留空 = 新对话；收到 done 后自动回填">
-      <span class="hint">续接时保留，重发即续接</span>
+      <input type="text" id="cuckSessionId" placeholder="首次发送时自动生成">
+      <span class="hint">Cuckoo 会话 ID；后续请求保持不变</span>
+    </div>
+    <div class="row">
+      <span class="label">providerSessionId:</span>
+      <input type="text" id="providerSessionId" placeholder="首次请求留空；响应后自动回填">
+      <span class="hint">Provider 会话 ID；续接时使用</span>
+    </div>
+    <div class="row">
+      <span class="label">请求类型:</span>
+      <select id="requestType">
+        <option value="user">user（用户输入）</option>
+        <option value="tool">tool（工具结果）</option>
+        <option value="compress">compress（历史压缩）</option>
+      </select>
+      <span class="hint">compress 请求会自动省略 providerSessionId</span>
     </div>
     <div class="row" style="align-items:flex-start;">
       <span class="label" style="padding-top:6px;">文本片段:</span>
@@ -158,11 +173,18 @@
 
     async function test() {
       const model = document.getElementById('modelId').value.trim();
-      const cuckSessionId = document.getElementById('cuckSessionId').value.trim();
+      let cuckSessionId = document.getElementById('cuckSessionId').value.trim();
+      const providerSessionId = document.getElementById('providerSessionId').value.trim();
+      const requestType = document.getElementById('requestType').value;
       const textFragments = collectTextFragments();
       const btn = document.getElementById('sendBtn');
 
       if (!model || textFragments.length === 0) return alert('请填写模型 ID 和至少一条文本片段');
+
+      if (!cuckSessionId) {
+        cuckSessionId = (crypto.randomUUID ? crypto.randomUUID() : 'cuck_' + Date.now() + '_' + Math.random().toString(16).slice(2));
+        document.getElementById('cuckSessionId').value = cuckSessionId;
+      }
 
       clearAll();
       btn.disabled = true;
@@ -171,11 +193,15 @@
 
       const inputArray = textFragments.map(function (t) { return { type: 'text', text: t }; });
       const bodyData = {
+        cuckSessionId: cuckSessionId,
         model: model,
-        requestId: 'r_' + Date.now(),
+        requestId: (crypto.randomUUID ? crypto.randomUUID() : 'req_' + Date.now() + '_' + Math.random().toString(16).slice(2)),
+        type: requestType,
         input: inputArray,
       };
-      bodyData.cuckSessionId = cuckSessionId || ('t_' + Date.now());
+      if (requestType !== 'compress' && providerSessionId) {
+        bodyData.providerSessionId = providerSessionId;
+      }
 
       let accText = '';
       let gotDone = false;
@@ -229,28 +255,47 @@
             let parsed;
             try { parsed = JSON.parse(dataStr); } catch (e) { parsed = null; }
 
-            if (evName === 'message' && parsed && parsed.delta) {
-              accText += parsed.delta;
+            if (evName === 'message' && parsed) {
+              if (parsed.cuckSessionId && parsed.cuckSessionId !== cuckSessionId) {
+                renderPane('<div class="err">协议错误：响应中的 cuckSessionId 与请求不一致</div>');
+              }
+              if (parsed.providerSessionId) {
+                document.getElementById('providerSessionId').value = parsed.providerSessionId;
+              }
+              if (Array.isArray(parsed.output)) {
+                parsed.output.forEach(function (part) {
+                  if (typeof part === 'string') accText += part;
+                });
+              }
               renderPane(
                 '<div class="ok">【正文】</div>\n' + escText(accText) +
-                '\n\n<div class="hint">流式接收中，已收 ' + accText.length + ' 字，' + (Date.now() - t0) + 'ms</div>'
+                '\n\n<div class="hint">流式接收中，已收 ' + accText.length + ' 字，' + (Date.now() - t0) + 'ms</div>' +
+                '\nproviderSessionId: ' + escText(document.getElementById('providerSessionId').value || '(尚未返回)')
               );
             } else if (evName === 'done' && parsed) {
               gotDone = true;
-              const sid = parsed.sessionId || '';
-              if (sid) document.getElementById('cuckSessionId').value = sid;
+              if (parsed.providerSessionId) {
+                document.getElementById('providerSessionId').value = parsed.providerSessionId;
+              }
+              const providerSid = document.getElementById('providerSessionId').value.trim();
+              const usage = parsed.usage || {};
               renderPane(
                 '<div class="ok">【正文】</div>\n' + escText(accText) +
                 '\n\n<div class="ok">【done】</div>\n' +
                 'finishReason: ' + escText(parsed.finishReason || '?') + '\n' +
-                'sessionId: ' + escText(sid || '(null)') + '\n' +
+                'cuckSessionId: ' + escText(cuckSessionId) + '\n' +
+                'providerSessionId: ' + escText(providerSid || '(null)') + '\n' +
+                'usage: ' + escText(JSON.stringify(usage)) + '\n' +
                 '耗时: ' + (Date.now() - t0) + 'ms' + '\n' +
                 '共收到 ' + frameCount + ' 帧\n' +
-                (sid ? '<div class="ok">✅ 已自动填入 cuckSessionId，下次发送即续接</div>' : '<div class="err">⚠️ 未拿到 sessionId</div>')
+                (providerSid ? '<div class="ok">✅ Provider 会话 ID 已保存；下次请求可续接</div>' : '<div class="err">⚠️ 未拿到 providerSessionId</div>')
               );
-            } else if (evName === 'error' && parsed) {
+            } else if (evName === 'error') {
+              const errorText = parsed
+                ? ((parsed.code || 'error') + ': ' + (parsed.message || '未知错误'))
+                : dataStr;
               renderPane(
-                '<div class="err">【error】</div>\n' + escText(dataStr) +
+                '<div class="err">【error】</div>\n' + escText(errorText) +
                 (accText ? ('\n\n<div class="ok">【部分正文】</div>\n' + escText(accText)) : '')
               );
             }

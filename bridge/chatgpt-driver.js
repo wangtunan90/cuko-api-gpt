@@ -66,11 +66,13 @@ export async function waitInput(conn, maxSec) {
  * 填入文本（execCommand insertText 分段）。返回 { ok, written, expected }。
  * 注意：ProseMirror 合成 paste 会被识别为附件，必须用 insertText。
  */
-export async function fillInput(conn, text, maxRetries) {
+export async function fillInput(conn, text, maxRetries, shouldAbort = () => false) {
   const retries = Math.max(1, maxRetries || 3);
   let last = { ok: false, reason: 'no-attempt' };
   for (let attempt = 1; attempt <= retries; attempt++) {
+    if (shouldAbort()) return { ok: false, aborted: true };
     last = await fillInputOnce(conn, text);
+    if (shouldAbort()) return { ok: false, aborted: true };
     // [261120-fix] 导航后 ProseMirror 可能还没挂载完，DOM 在但 execCommand 无效。
     // written < 90% 视为失败，等 1.5s 重试（页面初始化通常 2-5s 完成）。
     if (last && last.ok) return last;
@@ -163,35 +165,74 @@ export async function inputLength(conn) {
  * 触发发送：优先真实鼠标点击按钮；失败回退 Enter（CDP dispatchKeyEvent）。
  * 返回 { ok, method }。
  */
-export async function triggerSend(conn, waitMs) {
+export async function triggerSend(conn, waitMs, shouldAbort = () => false) {
   const deadline = Date.now() + (waitMs || 8000);
   let attempt = 0;
   while (Date.now() < deadline) {
+    if (shouldAbort()) return { ok: false, aborted: true, attempt };
     attempt++;
     const btn = await findSendButton(conn);
+    if (shouldAbort()) return { ok: false, aborted: true, attempt };
+
     if (btn.found) {
+      let pressed = false;
       try {
+        if (shouldAbort()) return { ok: false, aborted: true, attempt };
+        pressed = true;
         await conn.Input.dispatchMouseEvent({ type: 'mousePressed', x: btn.x, y: btn.y, button: 'left', clickCount: 1 });
-        await conn.Input.dispatchMouseEvent({ type: 'mouseReleased', x: btn.x, y: btn.y, button: 'left', clickCount: 1 });
-        await new Promise(r => setTimeout(r, 500));
+      } catch (e) {
+        console.warn('[driver] 鼠标按下失败:', e.message);
+      } finally {
+        if (pressed) {
+          try {
+            await conn.Input.dispatchMouseEvent({ type: 'mouseReleased', x: btn.x, y: btn.y, button: 'left', clickCount: 1 });
+          } catch (e) {
+            console.warn('[driver] 鼠标释放失败:', e.message);
+          }
+        }
+      }
+      if (shouldAbort()) return { ok: false, aborted: true, attempt };
+      await new Promise(r => setTimeout(r, 500));
+      if (shouldAbort()) return { ok: false, aborted: true, attempt };
+      try {
         const remain = await inputLength(conn);
+        if (shouldAbort()) return { ok: false, aborted: true, attempt };
         if (remain <= 2) return { ok: true, method: 'click', attempt };
       } catch (e) {
-        console.warn('[driver] 鼠标点击失败:', e.message);
+        console.warn('[driver] 检查输入框失败:', e.message);
       }
     } else {
       // 无按钮：Enter（CDP）
+      let pressed = false;
       try {
+        if (shouldAbort()) return { ok: false, aborted: true, attempt };
+        pressed = true;
         await conn.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-        await conn.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-        await new Promise(r => setTimeout(r, 400));
+      } catch (e) {
+        console.warn('[driver] Enter 按下失败:', e.message);
+      } finally {
+        if (pressed) {
+          try {
+            await conn.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+          } catch (e) {
+            console.warn('[driver] Enter 释放失败:', e.message);
+          }
+        }
+      }
+      if (shouldAbort()) return { ok: false, aborted: true, attempt };
+      await new Promise(r => setTimeout(r, 400));
+      if (shouldAbort()) return { ok: false, aborted: true, attempt };
+      try {
         const remain = await inputLength(conn);
+        if (shouldAbort()) return { ok: false, aborted: true, attempt };
         if (remain <= 2) return { ok: true, method: 'enter', attempt };
       } catch (e) {
-        console.warn('[driver] Enter 失败:', e.message);
+        console.warn('[driver] 检查输入框失败:', e.message);
       }
     }
+
     await new Promise(r => setTimeout(r, 600));
+    if (shouldAbort()) return { ok: false, aborted: true, attempt };
   }
   return { ok: false, method: 'none', attempt };
 }
