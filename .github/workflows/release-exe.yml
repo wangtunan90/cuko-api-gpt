@@ -1,0 +1,136 @@
+# 打 tag（v*）、发布 Release 或手动触发时，在 Windows 上构建单文件 exe 并附到 Release
+name: Release EXE
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要创建/更新的 Release tag（例如 v0.1.0）'
+        required: true
+        default: 'v0.1.0'
+
+concurrency:
+  group: release-exe-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 离线解析测试
+        run: npm test
+
+      - name: 构建 exe
+        run: npm run build:exe
+
+      - name: 校验产物
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $exe = "dist/cuko-api-gpt.exe"
+          if (-not (Test-Path $exe)) { throw "未生成 $exe" }
+          $size = (Get-Item $exe).Length
+          Write-Host ("exe 大小: {0:N1} MB" -f ($size / 1MB))
+          if ($size -lt 50MB) { throw "exe 体积异常（$size 字节）" }
+          if (-not (Test-Path "dist/使用说明.txt")) { throw "未生成 使用说明.txt" }
+
+      - name: 冒烟测试
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $env:CUKO_HTTP_PORT = "39123"
+          $p = Start-Process -FilePath "dist/cuko-api-gpt.exe" -PassThru -WindowStyle Hidden
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:39123/v1/models" -TimeoutSec 3 -UseBasicParsing
+                if ($r.StatusCode -eq 200) { $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) { throw "exe 启动后 /v1/models 无响应" }
+            Write-Host "models: $($r.Content)"
+            $h = Invoke-WebRequest -Uri "http://127.0.0.1:39123/" -TimeoutSec 5 -UseBasicParsing
+            if ($h.Content -notmatch 'cuko-api-gpt') { throw "管理台页面异常" }
+            $info = Invoke-WebRequest -Uri "http://127.0.0.1:39123/api/info" -TimeoutSec 5 -UseBasicParsing
+            Write-Host "api/info: $($info.Content)"
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+
+      - name: 解析 Release tag
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = ""
+          if ("${{ github.event_name }}" -eq "release") { $tag = "${{ github.event.release.tag_name }}" }
+          elseif ("${{ github.event_name }}" -eq "workflow_dispatch") { $tag = "${{ inputs.tag }}" }
+          else { $tag = "${{ github.ref_name }}" }
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw "无法确定 tag" }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: 重命名产物
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item "dist/cuko-api-gpt.exe" "out/cuko-api-gpt-$tag.exe"
+          Copy-Item "dist/使用说明.txt" "out/README-$tag.txt"
+
+      - name: 上传工作流产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuko-api-gpt-${{ steps.meta.outputs.tag }}
+          path: out/*
+          retention-days: 30
+
+      - name: 创建或更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            out/cuko-api-gpt-*.exe
+            out/README-*.txt
+          body: |
+            ## cuko-api-gpt ${{ steps.meta.outputs.tag }}
+
+            把 **ChatGPT 网页版** 的聊天能力，通过 CDP 驱动独立 Chrome，暴露成 **Cuko API**（HTTP/SSE）。
+
+            ### 快速开始
+            1. 下载 exe，放到有写权限的目录（不要放 Program Files），双击运行
+            2. 浏览器打开 http://127.0.0.1:3001/ 进入管理台
+            3. 填模型 ID + 显示名称 → 「添加并启动 Chrome」→ 在弹出窗口登录 chatgpt.com
+            4. 点「检查」看到 ok → 客户端填 API 地址 http://127.0.0.1:3001，协议选 Cuko API (SSE)，密钥留空
+
+            ### 注意
+            - 需要 Windows + 已安装 Chrome；exe 未签名，SmartScreen 选「更多信息 → 仍要运行」
+            - 所有数据在 exe 同级 data/ 目录；改端口编辑 data/config.json
+
+            > 本项目与 OpenAI 无任何关联，非官方实现。请仅在你拥有或获得授权的账号上使用。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

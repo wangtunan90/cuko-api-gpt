@@ -3,6 +3,10 @@ dist/
 build/
 data/
 *.log
+.idea/
+.vscode/
+%SystemDrive%/
+undefined/
 .DS_Store
 Thumbs.db
 .env

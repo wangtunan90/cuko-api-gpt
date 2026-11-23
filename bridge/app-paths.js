@@ -13,7 +13,17 @@ let isSea = false;
 try { isSea = !!req('node:sea').isSea(); } catch (_) { isSea = false; }
 
 export const IS_SEA = isSea;
-export const APP_ROOT = isSea ? import.meta.dirname : path.join(import.meta.dirname, '..');
+// [261123] SEA 下 import.meta.dirname 不可靠，用 exe 所在目录（data/ 建在 exe 旁边）
+export const APP_ROOT = isSea ? path.dirname(process.execPath) : path.join(import.meta.dirname, '..');
+
+/** 读取内置资源：exe 里读 SEA asset，开发时读项目文件 */
+export function readAppAsset(rel) {
+  if (isSea) {
+    try { return req('node:sea').getAsset(rel, 'utf8'); }
+    catch (e) { console.warn('[asset] 读取内嵌资源失败，回退到磁盘:', rel, e.message); }
+  }
+  return fs.readFileSync(path.join(APP_ROOT, rel), 'utf8');
+}
 export const DATA_DIR = path.join(APP_ROOT, 'data');
 export const UI_DIR = path.join(APP_ROOT, 'ui');
 
