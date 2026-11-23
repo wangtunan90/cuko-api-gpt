@@ -8,18 +8,28 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DATA_DIR, APP_ROOT, readUiIndexHtml } from './app-paths.js';
-import { resolveProfile, launchChrome, waitPort, activeModels, PORT, getAccounts, saveAccounts } from './core.js';
-import { randomInRange } from './default-config.js';
-import { closeAllConnections } from './cdp-connection.js';
+import { resolveProfile, launchChrome, waitPort, activeModels, PORT, getAccounts, saveAccounts, getProfiles, saveProfiles } from './core.js';
+import { randomInRange, DEFAULT_PROFILE_VALUES, FIELD_LABELS, validateProfile } from './default-config.js';
+import { closeAllConnections, closeConnection } from './cdp-connection.js';
 import { getConnection } from './cdp-connection.js';
 import { createFrameDecoder, extractData } from './sse.js';
 import { createExtractor, resolveStatus } from './extractor.js';
 import { probeInput, waitInput, fillInput, findSendButton, inputLength, triggerSend, checkLogin } from './chatgpt-driver.js';
+import { normalizeInputItems } from './input.js';
+import { loadSessions, saveSessions } from './session-store.js';
+import { initLogFile, teeConsoleToFile } from './logger.js';
+import { resolveRuntimeConfig, ensureRuntimeConfigFile, portInUseHint, RUNTIME_CONFIG_FILE } from './runtime-config.js';
 
 const TMP_DIR = path.join(DATA_DIR, 'tmp');
 
 /** Provider 会话映射（providerSessionId -> ChatGPT 会话信息） */
-const providerSessions = new Map();
+const runtimeCfg = resolveRuntimeConfig();
+if (ensureRuntimeConfigFile()) console.log('[config] 已生成默认配置文件:', RUNTIME_CONFIG_FILE);
+const LOG_FILE = initLogFile();
+teeConsoleToFile();
+console.log('[bridge] 日志落盘:', LOG_FILE);
+const providerSessions = loadSessions();
+console.log('[bridge] 已恢复 Provider 会话:', providerSessions.size, '个');
 
 /** 已处理的 requestId，用于幂等检查 */
 const processedRequestIds = new Set();
@@ -35,18 +45,6 @@ function isConversationRequest(url, method) {
   } catch (_) { return false; }
 }
 
-/** 规范化协议 input：当前版本仅支持 text，文件输入明确报错 */
-function normalizeInputItems(input) {
-  const out = [];
-  if (!Array.isArray(input)) return out;
-  for (const it of input) {
-    if (!it || typeof it !== 'object' || Array.isArray(it)) continue;
-    if (it.type === 'text' && typeof it.text === 'string') {
-      out.push(it.text);
-    }
-  }
-  return out;
-}
 
 /** 返回协议规定的 HTTP 错误 */
 function sendHttpError(res, status, code, message) {
@@ -104,13 +102,15 @@ async function handleCukoRequest(req, body, res) {
     sendHttpError(res, 400, 'invalid_request', 'compress 请求不得携带 providerSessionId');
     return;
   }
-  if (payload.input.some(it => !it || typeof it !== 'object' || it.type !== 'text' || typeof it.text !== 'string')) {
-    sendHttpError(res, 400, 'invalid_request', '当前 Provider 版本仅支持 type=text 的输入项，暂不支持文件输入');
+  const norm = normalizeInputItems(payload.input);
+  if (norm.items.some(i => i.kind === 'file')) {
+    sendHttpError(res, 400, 'invalid_request', '当前 Provider 版本暂不支持文件输入');
     return;
   }
-
-  const texts = normalizeInputItems(payload.input);
-  const userText = texts.join('\n').trim();
+  if (norm.unknown.length) console.warn('[input] 未识别的输入项:', norm.unknown.join(', '));
+  const texts = norm.items.map(i => i.text);
+  const userText = texts.join(requestType === 'compress' ? '\n\n' : '\n').trim();
+  if (requestType === 'compress') console.log('[cuko] 历史压缩请求：' + texts.length + ' 段，合并后 ' + userText.length + ' 字（强制新对话）');
   if (!userText) {
     sendHttpError(res, 400, 'invalid_request', 'input 中至少需要一条非空文本');
     return;
@@ -281,6 +281,30 @@ async function handleCukoRequest(req, body, res) {
     const frameDecoder = createFrameDecoder();
     const extractor = createExtractor(null);
 
+    // [261123] 边生成边推送（参考 cuko-api-quick chat.js）
+    let headSent = false;
+    let sentText = '';
+    let divergeWarned = false;
+    const pushDelta = () => {
+      if (res.writableEnded) return;
+      const convId = (extractor.msgIds && extractor.msgIds.conversationId)
+        || (existingSession && existingSession.conversationId);
+      if (!convId) return; // 拿到 conversation_id 才开始推，保证 providerSessionId 可续接
+      if (!headSent) {
+        headSent = true;
+        recordSession();
+        writeSse(res, 'message', { cuckSessionId, providerSessionId: responseProviderSessionId, output: [] });
+      }
+      const cur = extractor.text;
+      if (cur.length <= sentText.length) return;
+      if (!cur.startsWith(sentText)) {
+        if (!divergeWarned) { divergeWarned = true; console.warn('[cuko] 正文被改写（replace/truncate），暂停增量推送'); }
+        return;
+      }
+      writeSse(res, 'message', { output: [cur.slice(sentText.length)] });
+      sentText = cur;
+    };
+
     const flushFrame = (frame) => {
       const r = extractData(frame);
       if (r == null) return;
@@ -293,6 +317,7 @@ async function handleCukoRequest(req, body, res) {
     const feed = (chunkText) => {
       const frames = frameDecoder.push(chunkText);
       for (const f of frames) flushFrame(f);
+      pushDelta();
       if (extractor.endTurn && !dispatched) {
         finishStream();
       }
@@ -306,7 +331,9 @@ async function handleCukoRequest(req, body, res) {
           conversationId: convId,
           cuckSessionId,
           modelId,
+          updatedAt: Date.now(),
         });
+        saveSessions(providerSessions);
       }
     };
 
@@ -337,12 +364,9 @@ async function handleCukoRequest(req, body, res) {
               : 'Provider 未能生成有效响应'),
         });
       } else {
-        if (extractor.textLen > 0) {
-          writeSse(res, 'message', {
-            cuckSessionId,
-            providerSessionId: responseProviderSessionId,
-            output: [extractor.text],
-          });
+        pushDelta();
+        if (sentText.length !== extractor.textLen) {
+          console.warn('[cuko] 增量与最终正文不一致：已推 ' + sentText.length + ' 字，最终 ' + extractor.textLen + ' 字');
         }
 
         const outputTokens = estimateTokens(extractor.text);
@@ -529,7 +553,7 @@ const server = http.createServer(async (req, res) => {
       const accounts = getAccounts();
       const data = accounts.map(a => ({
         id: a.modelId,
-        name: a.modelId,
+        name: a.displayName || a.modelId,
       }));
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ data }));
@@ -551,12 +575,166 @@ const server = http.createServer(async (req, res) => {
     // ===== 账号管理 API（简化） =====
     if (req.method === 'GET' && pathname === '/api/accounts') {
       const accounts = getAccounts();
-      const out = accounts.map(a => {
+      const probe = async (port) => {
+        try { const r = await fetch('http://127.0.0.1:' + port + '/json/version', { signal: AbortSignal.timeout(800) }); return r.ok; }
+        catch (_) { return false; }
+      };
+      const out = await Promise.all(accounts.map(async a => {
         const eff = resolveProfile(a);
-        return { ...a, profileId: a.profileId || 'default', profileName: eff.name };
-      });
+        return { ...a, profileId: a.profileId || 'default', profileName: eff.name,
+          status: (await probe(a.debugPort)) ? 'online' : 'offline', busy: activeModels.has(a.modelId) };
+      }));
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(out));
+      return;
+    }
+
+    // ===== [261123] 管理 API（参考 cuko-api-quick） =====
+    const json = (status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+    const readJson = async () => { try { return JSON.parse((await readBody(req)) || '{}'); } catch (_) { return null; } };
+    const profileExists = (pid) => !pid || pid === 'default' || getProfiles().some(p => p.id === pid);
+
+    if (req.method === 'GET' && pathname === '/api/info') {
+      let version = '0.1.0';
+      try { version = JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'package.json'), 'utf8')).version; } catch (_) {}
+      json(200, { port: runtimeCfg.port, host: runtimeCfg.host, baseUrl: 'http://127.0.0.1:' + runtimeCfg.port,
+        portSource: runtimeCfg.portSource, configFile: RUNTIME_CONFIG_FILE, version });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/accounts') {
+      const data = await readJson();
+      if (!data) { json(400, { error: '请求体不是有效 JSON' }); return; }
+      const modelId = String(data.modelId || '').trim();
+      if (!/^[a-zA-Z0-9_-]+$/.test(modelId)) { json(400, { error: '模型 ID 只能用英文、数字、下划线、中划线' }); return; }
+      const accounts = getAccounts();
+      if (accounts.some(a => a.modelId === modelId)) { json(409, { error: '该模型 ID 已存在' }); return; }
+      if (!profileExists(data.profileId)) { json(400, { error: '指定的配置方案不存在' }); return; }
+      const maxPort = accounts.reduce((m, a) => Math.max(m, Number(a.debugPort) || 0), 9332);
+      const account = { modelId, displayName: String(data.displayName || modelId).trim(), debugPort: maxPort + 1,
+        profileId: data.profileId || 'default', createdAt: Date.now() };
+      accounts.push(account);
+      saveAccounts(accounts);
+      const cfg = resolveProfile(account).values;
+      launchChrome(account, cfg.targetUrl, cfg);
+      json(200, { success: true, account });
+      return;
+    }
+
+    const am = pathname.match(/^\/api\/accounts\/([^/]+)(\/open)?$/);
+    if (am && ((am[2] && req.method === 'POST') || (!am[2] && (req.method === 'PUT' || req.method === 'DELETE')))) {
+      const id = decodeURIComponent(am[1]);
+      const accounts = getAccounts();
+      const acc = accounts.find(a => a.modelId === id);
+      if (!acc) { json(404, { error: '账号不存在: ' + id }); return; }
+      if (am[2]) {
+        const cfg = resolveProfile(acc).values;
+        launchChrome(acc, cfg.targetUrl, cfg);
+        json(200, { success: true });
+        return;
+      }
+      if (req.method === 'PUT') {
+        const data = await readJson();
+        if (!data) { json(400, { error: '请求体不是有效 JSON' }); return; }
+        if (typeof data.displayName === 'string' && data.displayName.trim()) acc.displayName = data.displayName.trim();
+        if (data.profileId !== undefined) {
+          if (!profileExists(data.profileId)) { json(400, { error: '指定的配置方案不存在' }); return; }
+          acc.profileId = data.profileId || 'default';
+        }
+        saveAccounts(accounts);
+        json(200, { success: true, account: acc });
+        return;
+      }
+      // DELETE
+      if (activeModels.has(id)) { json(409, { error: '该账号正在处理请求，请稍后再删' }); return; }
+      saveAccounts(accounts.filter(a => a.modelId !== id));
+      try { await closeConnection(id); } catch (_) {}
+      let purged = false;
+      if (url.searchParams.get('purge') === '1') {
+        try {
+          const dir = acc.profileDir || path.join(DATA_DIR, 'profiles', id);
+          if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+          purged = true;
+        } catch (e) { console.error('[accounts] 删除数据目录失败（Chrome 可能还开着）:', e.message); }
+      }
+      json(200, { success: true, purged });
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/profiles') {
+      json(200, { default: { id: 'default', name: '默认方案', isDefault: true, values: DEFAULT_PROFILE_VALUES },
+        profiles: getProfiles(), labels: FIELD_LABELS });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/api/profiles') {
+      const data = await readJson();
+      if (!data) { json(400, { error: '请求体不是有效 JSON' }); return; }
+      const name = String(data.name || '').trim();
+      if (!name) { json(400, { error: '缺少方案名称' }); return; }
+      let values;
+      try { values = validateProfile(data.values || { ...DEFAULT_PROFILE_VALUES }); } catch (e) { json(400, { error: e.message }); return; }
+      const profiles = getProfiles();
+      const created = { id: 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, values, createdAt: Date.now() };
+      profiles.push(created);
+      saveProfiles(profiles);
+      json(200, created);
+      return;
+    }
+    const pm = pathname.match(/^\/api\/profiles\/([^/]+)$/);
+    if (pm && (req.method === 'PUT' || req.method === 'DELETE')) {
+      const id = decodeURIComponent(pm[1]);
+      if (id === 'default') { json(403, { error: '默认方案不可修改或删除' }); return; }
+      const profiles = getProfiles();
+      const p = profiles.find(x => x.id === id);
+      if (!p) { json(404, { error: '方案不存在: ' + id }); return; }
+      if (req.method === 'PUT') {
+        const data = await readJson();
+        if (!data) { json(400, { error: '请求体不是有效 JSON' }); return; }
+        if (data.name !== undefined) {
+          const name = String(data.name || '').trim();
+          if (!name) { json(400, { error: '名称不能为空' }); return; }
+          p.name = name;
+        }
+        if (data.values !== undefined) {
+          try { p.values = validateProfile(data.values); } catch (e) { json(400, { error: e.message }); return; }
+        }
+        saveProfiles(profiles);
+        json(200, p);
+        return;
+      }
+      saveProfiles(profiles.filter(x => x.id !== id));
+      const accounts = getAccounts();
+      let affected = 0;
+      for (const a of accounts) if (a.profileId === id) { a.profileId = 'default'; affected++; }
+      if (affected) saveAccounts(accounts);
+      json(200, { success: true, affectedAccounts: affected });
+      return;
+    }
+
+    // [261123] 账号健康检查：GET /api/accounts/:id/health
+    const hm = req.method === 'GET' && pathname.match(/^\/api\/accounts\/([^/]+)\/health$/);
+    if (hm) {
+      const id = decodeURIComponent(hm[1]);
+      const account = getAccounts().find(a => a.modelId === id);
+      const reply = (status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+      if (!account) { reply(404, { state: 'error', message: '账号不存在: ' + id }); return; }
+      let result;
+      try {
+        const conn = await getConnection(account);
+        const login = await checkLogin(conn);
+        if (login.loggedOut) {
+          result = { state: 'login_required', message: login.guest ? '页面处于访客状态，请在该 Chrome 窗口登录' : '页面在登录页，请登录', url: login.url };
+        } else {
+          const p = await probeInput(conn);
+          result = p.found
+            ? { state: 'ok', message: '已登录，输入框可用', url: login.url }
+            : { state: 'error', message: '未找到输入框（页面可能未加载完）', url: login.url };
+        }
+      } catch (e) {
+        result = { state: 'error', message: 'CDP 连接失败（Chrome 未启动？）: ' + e.message };
+      }
+      result.checkedAt = Date.now();
+      reply(200, result);
       return;
     }
 
@@ -578,9 +756,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log('[cuko-api-gpt] 运行在 http://127.0.0.1:' + PORT);
-  console.log('[cuko-api-gpt] 管理台: http://127.0.0.1:' + PORT + '/');
+server.on('error', (e) => {
+  if (e && e.code === 'EADDRINUSE') console.error('[cuko-api-gpt] ' + portInUseHint(runtimeCfg.port));
+  else console.error('[http] 启动失败:', e && e.message);
+  process.exit(1);
+});
+server.listen(runtimeCfg.port, runtimeCfg.host, () => {
+  console.log('[cuko-api-gpt] 运行在 http://' + runtimeCfg.host + ':' + runtimeCfg.port + '（端口来源：' + runtimeCfg.portSource + '）');
+  console.log('[cuko-api-gpt] 管理台: http://127.0.0.1:' + runtimeCfg.port + '/');
+  console.log('[cuko-api-gpt] 配置文件:', RUNTIME_CONFIG_FILE);
   console.log('[cuko-api-gpt] 项目根:', path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, ''))));
 });
 

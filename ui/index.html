@@ -5,49 +5,171 @@
 <title>cuko-api-gpt 管理台</title>
 <style>
   body { font-family: -apple-system, "Segoe UI", sans-serif; background:#f5f5f5; margin:0; padding:24px; color:#222; }
-  h1 { font-size:20px; margin:0 0 16px; }
-  .card { background:#fff; border-radius:8px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  .card { background:#fff; border-radius:8px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.08); margin-top:16px; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #eee; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #eee; vertical-align:top; }
   th { color:#888; font-weight:500; }
-  .muted { color:#999; }
+  .muted { color:#999; font-size:13px; }
   code { background:#f0f0f0; padding:1px 5px; border-radius:3px; font-size:12px; }
-  .empty { text-align:center; color:#999; padding:24px; }
+  button { font-size:12px; padding:4px 10px; margin:0 4px 4px 0; border:1px solid #ccc; background:#fff; border-radius:4px; cursor:pointer; }
+  button.primary { background:#10a37f; color:#fff; border-color:#10a37f; }
+  button.danger { color:#c33; border-color:#e5b5b5; }
+  input, select { font-size:13px; padding:4px 6px; border:1px solid #ccc; border-radius:4px; }
+  textarea { width:100%; height:300px; font-family:Consolas, monospace; font-size:12px; box-sizing:border-box; }
+  .ok { color:#10a37f; } .bad { color:#c33; } .warn { color:#d58512; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
 </style>
 </head>
 <body>
   <h1>cuko-api-gpt 管理台</h1>
+  <div class="muted" id="info">加载中…</div>
+
   <div class="card">
-    <h2 style="font-size:15px; margin:0 0 12px;">账号列表</h2>
+    <h2>账号</h2>
     <table>
-      <thead>
-        <tr><th>模型 ID</th><th>显示名称</th><th>调试端口</th><th>配置方案</th></tr>
-      </thead>
-      <tbody id="listBody"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+      <thead><tr><th>模型 ID</th><th>显示名称</th><th>端口</th><th>状态</th><th>配置方案</th><th>健康</th><th>操作</th></tr></thead>
+      <tbody id="accBody"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
     </table>
+    <div class="row" style="margin-top:12px;">
+      <input id="newId" placeholder="模型 ID（如 gpt-main）">
+      <input id="newName" placeholder="显示名称">
+      <select id="newProfile"></select>
+      <button class="primary" id="btnAdd">添加并启动 Chrome</button>
+    </div>
   </div>
-  <div class="card" style="margin-top:16px;">
-    <h2 style="font-size:15px; margin:0 0 8px;">API</h2>
-    <p class="muted" style="font-size:13px; margin:0;">
-      <code>GET /v1/models</code> 列账号 · <code>POST /v1/responses</code> 发消息（SSE）<br>
-      账号在 <code>data/accounts.json</code> 配置。
+
+  <div class="card">
+    <h2>配置方案</h2>
+    <div class="row">
+      <select id="pfSel"></select>
+      <button id="btnPfNew">从默认方案复制新建</button>
+      <button id="btnPfSave" class="primary">保存</button>
+      <button id="btnPfRename">改名</button>
+      <button id="btnPfDel" class="danger">删除</button>
+    </div>
+    <p class="muted" id="pfHint"></p>
+    <textarea id="pfValues" spellcheck="false"></textarea>
+  </div>
+
+  <div class="card">
+    <h2>调用方式</h2>
+    <p class="muted" style="margin:0;">
+      <code>GET /v1/models</code> 列账号 · <code>POST /v1/responses</code> 发消息（SSE）·
+      <a href="/test-stream.html" target="_blank">流式测试页</a>
     </p>
   </div>
+
 <script>
-async function loadList() {
-  const tbody = document.getElementById('listBody');
-  try {
-    const res = await fetch('/api/accounts');
-    const list = await res.json();
-    if (!list.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无账号，请在 data/accounts.json 添加</td></tr>'; return; }
-    tbody.innerHTML = list.map(a =>
-      '<tr><td>' + a.modelId + '</td><td>' + (a.displayName || '-') + '</td><td>' + (a.debugPort || '-') + '</td><td>' + (a.profileName || 'default') + '</td></tr>'
-    ).join('');
-  } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">加载失败: ' + e.message + '</td></tr>';
-  }
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+async function api(method, url, body) {
+  const r = await fetch(url, { method: method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || d.message || ('HTTP ' + r.status));
+  return d;
 }
-loadList();
+let pf = { default: null, profiles: [], labels: {} };
+const allProfiles = () => [pf.default].concat(pf.profiles).filter(Boolean);
+const profileOptions = (sel) => allProfiles().map((p) => '<option value="' + esc(p.id) + '"' + (p.id === sel ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('');
+
+async function loadInfo() {
+  try { const i = await api('GET', '/api/info'); $('info').textContent = i.baseUrl + '（端口来源：' + i.portSource + '）· v' + i.version; }
+  catch (e) { $('info').textContent = '读取服务信息失败: ' + e.message; }
+}
+
+async function loadProfiles() {
+  pf = await api('GET', '/api/profiles');
+  const cur = $('pfSel').value || 'default';
+  $('pfSel').innerHTML = profileOptions(cur);
+  $('newProfile').innerHTML = profileOptions('default');
+  showProfile();
+}
+function showProfile() {
+  const p = allProfiles().find((x) => x.id === $('pfSel').value) || pf.default;
+  $('pfValues').value = JSON.stringify(p.values, null, 2);
+  $('pfValues').readOnly = !!p.isDefault;
+  $('pfHint').textContent = p.isDefault ? '默认方案只读。要修改请先「从默认方案复制新建」。' : '直接编辑 JSON 后点「保存」。时间单位是秒。';
+}
+
+async function loadAccounts() {
+  const tb = $('accBody');
+  try {
+    const list = await api('GET', '/api/accounts');
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无账号，在下面添加</td></tr>'; return; }
+    tb.innerHTML = list.map((a) => '<tr data-id="' + esc(a.modelId) + '">' +
+      '<td>' + esc(a.modelId) + '</td>' +
+      '<td>' + esc(a.displayName || '-') + '</td>' +
+      '<td>' + esc(a.debugPort) + '</td>' +
+      '<td class="' + (a.status === 'online' ? 'ok' : 'muted') + '">' + esc(a.status) + (a.busy ? ' · <span class="warn">处理中</span>' : '') + '</td>' +
+      '<td><select data-act="profile">' + profileOptions(a.profileId || 'default') + '</select></td>' +
+      '<td class="health">-</td>' +
+      '<td><button data-act="open">打开</button><button data-act="health">检查</button><button data-act="rename">改名</button><button data-act="del" class="danger">删除</button></td>' +
+      '</tr>').join('');
+  } catch (e) { tb.innerHTML = '<tr><td colspan="7" class="bad">加载失败: ' + esc(e.message) + '</td></tr>'; }
+}
+
+$('accBody').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button'); if (!btn) return;
+  const tr = btn.closest('tr'); const id = tr.dataset.id; const act = btn.dataset.act;
+  try {
+    if (act === 'open') { await api('POST', '/api/accounts/' + encodeURIComponent(id) + '/open'); setTimeout(loadAccounts, 3000); }
+    if (act === 'health') {
+      const cell = tr.querySelector('.health'); cell.textContent = '检查中…';
+      const h = await api('GET', '/api/accounts/' + encodeURIComponent(id) + '/health');
+      cell.innerHTML = '<span class="' + (h.state === 'ok' ? 'ok' : 'bad') + '">' + esc(h.state) + '</span><br><span class="muted">' + esc(h.message) + '</span>';
+    }
+    if (act === 'rename') {
+      const name = prompt('新的显示名称'); if (!name) return;
+      await api('PUT', '/api/accounts/' + encodeURIComponent(id), { displayName: name }); loadAccounts();
+    }
+    if (act === 'del') {
+      if (!confirm('确定删除账号 ' + id + '？')) return;
+      const purge = confirm('是否同时删除它的 Chrome 登录数据？（不可恢复）\n确定 = 删除登录数据；取消 = 保留');
+      await api('DELETE', '/api/accounts/' + encodeURIComponent(id) + (purge ? '?purge=1' : '')); loadAccounts();
+    }
+  } catch (e) { alert(e.message); }
+});
+$('accBody').addEventListener('change', async (ev) => {
+  if (ev.target.dataset.act !== 'profile') return;
+  const id = ev.target.closest('tr').dataset.id;
+  try { await api('PUT', '/api/accounts/' + encodeURIComponent(id), { profileId: ev.target.value }); }
+  catch (e) { alert(e.message); loadAccounts(); }
+});
+$('btnAdd').onclick = async () => {
+  try {
+    await api('POST', '/api/accounts', { modelId: $('newId').value.trim(), displayName: $('newName').value.trim(), profileId: $('newProfile').value });
+    $('newId').value = ''; $('newName').value = ''; setTimeout(loadAccounts, 3000); loadAccounts();
+  } catch (e) { alert(e.message); }
+};
+$('pfSel').onchange = showProfile;
+$('btnPfNew').onclick = async () => {
+  const name = prompt('新方案名称'); if (!name) return;
+  try { const p = await api('POST', '/api/profiles', { name: name }); await loadProfiles(); $('pfSel').value = p.id; showProfile(); loadAccounts(); }
+  catch (e) { alert(e.message); }
+};
+$('btnPfSave').onclick = async () => {
+  const id = $('pfSel').value; if (id === 'default') { alert('默认方案不可修改'); return; }
+  let values; try { values = JSON.parse($('pfValues').value); } catch (e) { alert('JSON 格式错误: ' + e.message); return; }
+  try { await api('PUT', '/api/profiles/' + encodeURIComponent(id), { values: values }); alert('已保存'); loadProfiles(); }
+  catch (e) { alert(e.message); }
+};
+$('btnPfRename').onclick = async () => {
+  const id = $('pfSel').value; if (id === 'default') { alert('默认方案不可改名'); return; }
+  const name = prompt('新名称'); if (!name) return;
+  try { await api('PUT', '/api/profiles/' + encodeURIComponent(id), { name: name }); await loadProfiles(); loadAccounts(); }
+  catch (e) { alert(e.message); }
+};
+$('btnPfDel').onclick = async () => {
+  const id = $('pfSel').value; if (id === 'default') { alert('默认方案不可删除'); return; }
+  if (!confirm('确定删除该方案？使用它的账号会回退到默认方案')) return;
+  try { const r = await api('DELETE', '/api/profiles/' + encodeURIComponent(id)); $('pfSel').value = 'default'; await loadProfiles(); loadAccounts(); if (r.affectedAccounts) alert(r.affectedAccounts + ' 个账号已回退到默认方案'); }
+  catch (e) { alert(e.message); }
+};
+
+loadInfo();
+loadProfiles().then(loadAccounts).catch((e) => { $('pfHint').textContent = '加载方案失败: ' + e.message; loadAccounts(); });
 </script>
 </body>
 </html>

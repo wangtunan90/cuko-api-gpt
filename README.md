@@ -51,6 +51,30 @@ test/
 docs/protocols/         协议文档
 ```
 
+## [261123] 新增功能（参考 cuko-api-quick）
+
+- **端口配置**：`data/config.json`（首次启动自动生成）或环境变量 `CUKO_HTTP_PORT`，默认 3001；端口占用会给出处理建议
+- **日志落盘**：`data/logs/bridge-YYYY-MM-DD.log`
+- **会话持久化**：`data/sessions.json`，重启后 providerSessionId 仍可续接
+- **流式推送**：拿到 conversation_id 后先推 providerSessionId，之后逐段推增量
+- **输入兼容**：`text` / `content` 字符串 / `content` 数组；文件输入仍明确报 400
+- **登录判断**：URL + 页面登录按钮/头像，避免访客模式误用
+- **历史压缩**：`type=compress` 多段以空行拼接，强制新对话
+
+### 管理 API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/info` | 当前地址、端口来源、版本 |
+| GET | `/api/accounts` | 账号列表（含 online/offline、是否处理中） |
+| POST | `/api/accounts` | 新增账号（调试端口从 9333 递增，自动启动 Chrome） |
+| PUT | `/api/accounts/:id` | 改显示名称 / 换配置方案 |
+| DELETE | `/api/accounts/:id` | 删除账号；加 `?purge=1` 同时删 Chrome 登录数据 |
+| POST | `/api/accounts/:id/open` | 打开 Chrome |
+| GET | `/api/accounts/:id/health` | 健康检查：ok / login_required / error |
+| GET/POST | `/api/profiles` | 配置方案列表 / 新建 |
+| PUT/DELETE | `/api/profiles/:id` | 修改 / 删除方案（默认方案只读） |
+
 ## 待验证
 
 - 真机端到端（需 ChatGPT 账号登录）

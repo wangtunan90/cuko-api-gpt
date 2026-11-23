@@ -116,4 +116,9 @@ async function waitPort(account, maxSec) {
   return false;
 }
 
-export { getAccounts, saveAccounts, getProfiles, resolveProfile, launchChrome, waitPort, activeModels, PORT };
+function saveProfiles(profiles) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(PROFILES_FILE, JSON.stringify({ profiles }, null, 2), 'utf8');
+}
+
+export { getAccounts, saveAccounts, getProfiles, saveProfiles, resolveProfile, launchChrome, waitPort, activeModels, PORT };

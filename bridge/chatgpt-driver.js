@@ -242,8 +242,19 @@ export async function triggerSend(conn, waitMs, shouldAbort = () => false) {
  * 注意 ChatGPT 未登录会跳 https://chatgpt.com/auth/login。
  */
 export async function checkLogin(conn) {
-  const r = await conn.Runtime.evaluate({ expression: 'location.href', returnByValue: true });
-  const url = (r && r.result && r.result.value) || '';
-  const loggedOut = url.indexOf('/auth/login') >= 0 || url.indexOf('/sign_in') >= 0;
-  return { url, loggedOut };
+  // [261123] chatgpt.com 访客也能聊天，只看 URL 会误判；再看页面上的登录按钮 / 头像
+  const expr = `(() => {
+    const url = location.href;
+    const vis = (el) => el && el.offsetWidth > 0 && el.offsetHeight > 0;
+    const any = (sels) => sels.some(s => Array.from(document.querySelectorAll(s)).some(vis));
+    const loginBtn = any(['button[data-testid="login-button"]', 'a[href*="/auth/login"]', 'button[data-testid="signup-button"]']);
+    const profile = any(['[data-testid="accounts-profile-button"]', 'button[aria-label*="个人资料"]', 'button[aria-label*="Profile"]', 'img[alt*="User"]']);
+    return { url, loginBtn, profile };
+  })()`;
+  const r = await conn.Runtime.evaluate({ expression: expr, returnByValue: true });
+  const v = (r && r.result && r.result.value) || {};
+  const url = v.url || '';
+  const urlLoggedOut = url.indexOf('/auth/login') >= 0 || url.indexOf('/sign_in') >= 0;
+  const guest = !!v.loginBtn && !v.profile;
+  return { url, loggedOut: urlLoggedOut || guest, guest, loginBtn: !!v.loginBtn, profile: !!v.profile };
 }

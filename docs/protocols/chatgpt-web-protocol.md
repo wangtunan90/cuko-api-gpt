@@ -103,6 +103,14 @@ function extractData(block) { /* 取 data: 行 */ }
 
 ### 3.2 帧重放（必须去重）
 
+> **[261123 更正] cuko-api-gpt（CDP 方式）不做任何按内容去重。** 原因（见提交 e6cbf11）：
+> - 增量帧形如 `{"v":[{"p":"/message/content/parts/0","o":"append","v":"。"}]}`，**不含任何 id**，SSE 也没有 `id:` 行；
+>   回复里两次追加相同文本时帧 data 完全相同，按内容去重会误删 → 缺字。
+> - CDP 只监听第一个 conversation 请求（targetRequestId），续传请求本身不会被消费，同一响应内不会出现重放帧。
+> - 真正的遗留风险是：断线续传时数据走新请求 → 回复**缺尾**（不是重复），待实现续传请求接入。
+>
+> 以下为注入 hook 方式（cuckoo-code）的原始说明，仅供参考：
+
 可续传流会**重放已发过的帧**（重复帧之间夹着 `message_marker` 等）。若不去重，同一 append 执行两次 → 文本翻倍 → 破坏 cuckoo 围栏 → 提取 0 块。
 
 **全局去重**（不要求相邻）：同一 `observeBody` 内，见过的帧 data 直接跳过。frame data 本身含唯一 id（message_id 等），完全相同即重复。
@@ -321,9 +329,9 @@ function syncText() {
 
 **解法**：只在 `end_turn === true` 时立即派发。未 end_turn 时交给流关闭（`loadingFinished`）兜底派发。
 
-### 坑 3：帧会重放，必须全局去重
+### 坑 3：帧会重放（CDP 方式下不去重）
 
-见 3.2。
+见 3.2 的 [261123 更正]：CDP 方式不能按内容去重，否则相同文本片段会被误删导致缺字。
 
 ### 坑 4：正文消息过滤（channel + recipient + content_type）
 
