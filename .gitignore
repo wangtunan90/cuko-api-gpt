@@ -6,3 +6,8 @@ data/
 .DS_Store
 Thumbs.db
 .env
+
+# [261120] ChatGPT 对话导出/附件（运行时数据，不入库）
+dd3cae6f-*.json
+dd3cae6f-*_files/
+*-*_files/
