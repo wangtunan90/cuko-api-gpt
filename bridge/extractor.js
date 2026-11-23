@@ -42,7 +42,6 @@ export function createExtractor(reqMeta) {
   let text = '';
   const segments = []; // 按 message.id 分段
   let currentSeg = null;
-  const appendedSet = {}; // 正文 append 全局去重：key = seg|path|value
   let thinkText = '';
   let finished = false;
   let endTurn = false;
@@ -184,11 +183,6 @@ export function createExtractor(reqMeta) {
         const pseg = currentSeg || segmentFor(null);
         if (pseg.isFinal === false) return; // 非正文消息段：忽略
         if (typeof node.v === 'string') {
-          if (node.o === 'append' || node.o === 'add') {
-            const dupKey = String(pseg.id) + '|' + node.p + '|' + node.v;
-            if (appendedSet[dupKey]) return;
-            appendedSet[dupKey] = 1;
-          }
           if (node.o === 'append' || node.o === 'add') {
             pseg.text += node.v;
           } else if (node.o === 'truncate') {

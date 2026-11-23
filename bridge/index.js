@@ -280,14 +280,11 @@ async function handleCukoRequest(req, body, res) {
     const decoder = new TextDecoder('utf-8');
     const frameDecoder = createFrameDecoder();
     const extractor = createExtractor(null);
-    const seenFrames = {};
 
     const flushFrame = (frame) => {
       const r = extractData(frame);
       if (r == null) return;
       if (r === '[DONE]') { extractor.markDone(); return; }
-      if (seenFrames[r]) return; // 帧级全局去重（防重放）
-      seenFrames[r] = 1;
       let parsed;
       try { parsed = JSON.parse(r); } catch (_) { return; }
       extractor.consume(parsed);
